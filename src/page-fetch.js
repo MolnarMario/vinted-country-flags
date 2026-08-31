@@ -12,10 +12,13 @@
 //   - a JSON response is handed back verbatim, never evaluated
 //   - an item page is 2MB of HTML, so it is never handed back. One regex runs
 //     here and only the seller's numeric id crosses back.
+//
+// It also reads one response the site asks for on its own account. See below.
 
 (() => {
   const REQ = 'vcf-fetch-request';
   const RES = 'vcf-fetch-response';
+  const FEED = 'vcf-feed-items';
   const ALLOWED_JSON = /^\/api\/v2\/(catalog\/items|users\/\d+|countries)(\?|$)/;
   const ALLOWED_ITEM = /^\/items\/\d+(\?|$)/;
   const MEMBER = /\/member\/(\d+)/;
@@ -63,4 +66,43 @@
       reply({ ok: false, status: 0, error: String(e && e.message || e) });
     }
   });
+
+  // ------------------------------------------------------- homepage feed
+
+  // Scrolling the homepage pages the feed in from
+  // api.vinted.<tld>/homepage/homepage, and each item there carries the
+  // seller's id. That request is not one the extension can make: replayed with
+  // the same query it answers 400, so whatever authorises it is a header only
+  // Vinted's own front end sends. Reading the answer it already got costs
+  // nothing and is the only thing that puts a flag on a homepage card past the
+  // first screenful.
+  //
+  // Vinted sends it over XMLHttpRequest, not fetch, measured on vinted.ro. If
+  // that ever changes the homepage quietly falls back to its first screenful,
+  // and the same few lines wrapped around window.fetch bring it back.
+  const FEED_URL = /\/homepage\/homepage(\?|$)/;
+  const FeedMap = globalThis.VCF_FeedMap;
+
+  if (FeedMap) {
+    const open = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      // Nothing in here may throw or delay: this is Vinted's own request, and
+      // the page breaks if the wrapper does.
+      try {
+        if (FEED_URL.test(String(url))) {
+          this.addEventListener('load', () => {
+            try {
+              const pairs = FeedMap.fromApi(JSON.parse(this.responseText));
+              if (pairs.length) window.postMessage({ type: FEED, pairs }, location.origin);
+            } catch (e) {
+              /* not the JSON we expected, or a responseType with no text */
+            }
+          });
+        }
+      } catch (e) {
+        /* keep the request itself intact */
+      }
+      return open.call(this, method, url, ...rest);
+    };
+  }
 })();

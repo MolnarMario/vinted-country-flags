@@ -1,7 +1,7 @@
 # Vinted Country Flags
 
 Chrome extension that puts the seller's country flag in the corner of every item
-on Vinted, in the search grid and on the listing page. All 27 markets.
+on Vinted: the homepage, the search grid and the listing page. All 27 markets.
 
 ![the grid with flags](docs/screenshot.jpg)
 
@@ -145,6 +145,44 @@ the catalog on all 92.
 On a euro domain the module turns itself off, correctly: it needs two currencies
 before it will answer, and on vinted.fr it only ever sees one.
 
+### The homepage is a different site
+
+Everything above is about a catalog page. The homepage answers to none of it.
+`/api/v2/catalog/items` does not return its feed at all: 0 of the 20 cards on
+the vinted.ro homepage came back in a catalog draw. The endpoint that does serve
+it, `api.vinted.<tld>/homepage/homepage`, answers 400 to the same query replayed
+by anyone but Vinted's own front end. And its cards are numbered differently, so
+even the selector missed them: every homepage card carries the same
+`data-testid="feed-item--image"`, with the item id only in the link over the
+photo.
+
+None of that matters, because the homepage already tells you the seller. It just
+does it twice, in two shapes:
+
+- The first screenful is server rendered, and the React payload the page
+  hydrates from is still sitting in the document with `"user":{"id":...}` on
+  every item. Reading it is a string scan.
+- Everything after it arrives on the XHR the page fires when the feed
+  paginates, where the same fact is spelled `user_id`. `src/page-fetch.js`
+  wraps `XMLHttpRequest.open` and reads that response as it goes past.
+
+Both routes together named the seller of 70 of 70 cards on vinted.ro, 20 from
+the document and 50 from one pagination response, for no request at all.
+
+Knowing the seller is not the same as knowing the country, though, and 70 known
+sellers is 70 lookups at one a second. So the homepage spends two catalog
+requests it will never match a card with, purely to learn exchange rates, and
+then reads the country off the price like any other card. Two draws rather than
+one because the fingerprint refuses to answer until it knows the euro rate, and
+a single draw on vinted.ro carried two euro sellers, one short of the three it
+takes to trust a rate. With both in hand it answered 66 of the 70 cards, and a
+spot check of 13 against the sellers' actual profiles agreed on all 13. Five
+cards cost a lookup instead of seventy.
+
+A euro domain skips those two requests. The fingerprint can never work there and
+every seller in the response comes back as an unresolved eurozone marker, so the
+homepage falls back to a lookup per card, same as its catalog pages.
+
 A card the price refuses, and nothing else reached, gets the last resort: fetch
 the item page, which links to exactly one member. That regex runs in the page
 context so the two megabytes never cross into the extension, and only the seller
@@ -233,6 +271,7 @@ src/countries.js    the market table from /api/v2/countries, currency rule, name
 src/price-currency.js  learns exchange rates, reads the currency off a price
 src/throttle.js     the tab's queue in front of the worker's bucket
 src/store.js        cache client, one message per lookup
+src/feed-map.js     reads the homepage's own data for item id to seller id
 src/content.js      DOM scanning, the resolution ladder, badge injection
 src/badge.css
 flags/*.svg         252 files: every ISO country, 76 drawn, the rest letter tiles
@@ -264,16 +303,18 @@ source art.
 node --test test/logic.test.mjs
 ```
 
-39 tests over the currency rule against the real 27-market table, the country-id
+49 tests over the currency rule against the real 27-market table, the country-id
 join, the flag files, price parsing in every market's number format, the token
 bucket's arithmetic and its handling of `Retry-After`, the catalog query
-translation, and the price fingerprint including the cases that used to answer
-wrongly on a forint domain.
+translation, the two homepage feed parsers, and the price fingerprint including
+the cases that used to answer wrongly on a forint domain.
 
 The DOM-dependent parts were verified against live pages: 12 of 12 flags matched
 the seller's actual country on vinted.ro, and the card selector, the catalog
 slug and the `/items/` and `/member/` paths were confirmed unchanged on
-vinted.fr, vinted.de, vinted.pl, vinted.co.uk and vinted.ro.
+vinted.fr, vinted.de, vinted.pl, vinted.co.uk and vinted.ro. On the homepage,
+the selector found all 70 cards, both feed parsers named all 70 sellers, and the
+fingerprint's answer matched the profile for all 13 cards spot-checked.
 
 ## Dead ends, so nobody probes them again
 
@@ -290,9 +331,11 @@ vinted.fr, vinted.de, vinted.pl, vinted.co.uk and vinted.ro.
 - `service_fee`. A pure function of price: `0.70 + 0.05 × price` held to the
   cent across 22 items for French, Dutch and Italian sellers alike.
 - `/api/v2/items/{id}`. 404 for a logged out visitor.
-- Watching the page's own traffic. The grid is server rendered and a fresh load
-  makes no `/api/v2/` call at all, and `seller_currency` appears zero times in
-  the eight megabytes of markup. Mirroring the query is the only route.
+- Watching the page's own traffic, on a catalog page. The grid is server
+  rendered and a fresh load makes no `/api/v2/` call at all, and
+  `seller_currency` appears zero times in the eight megabytes of markup.
+  Mirroring the query is the only route there. The homepage is the exception and
+  is handled above.
 
 ## Licence
 

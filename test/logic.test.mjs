@@ -862,3 +862,81 @@ test('a euro domain turns the fingerprint off by itself', () => {
   assert.equal(P.ready(), false, 'one currency is not a comparison');
   assert.equal(P.currencyFor(40), null);
 });
+
+// ------------------------------------------------------------- homepage feed
+
+function loadFeedMap() {
+  const ctx = vm.createContext({ console });
+  vm.runInContext('globalThis.globalThis = globalThis;', ctx);
+  loadInto(ctx, 'src/feed-map.js');
+  return ctx.VCF_FeedMap;
+}
+
+// An array built inside the sandbox has the sandbox's Array as its prototype,
+// which deepEqual counts as a difference. This drags it back over.
+const plain = (v) => JSON.parse(JSON.stringify(v));
+
+// One item block as vinted.ro served it on 2026-09-01, inside the React payload
+// the homepage hydrates from: JSON in a JavaScript string literal, so every
+// quote arrives escaped. Trimmed to the fields around the two ids.
+const FLIGHT_ITEM =
+  '\\"type\\":\\"item\\",\\"entity\\":{\\"id\\":9848877536,\\"title\\":\\"See-through top\\",' +
+  '\\"user\\":{\\"id\\":234765155,\\"isBusiness\\":false},\\"url\\":\\"/items/9848877536-see-through-top\\",' +
+  '\\"favouriteCount\\":8,\\"price\\":{\\"amount\\":\\"5.32\\",\\"currencyCode\\":\\"RON\\"}}';
+
+test('the homepage names its sellers in the document, at no cost', () => {
+  const F = loadFeedMap();
+  const pairs = F.fromFlight('self.__next_f.push([1,"66:[{\\"blocks\\":[{' + FLIGHT_ITEM + '}]}]"])');
+  assert.deepEqual(plain(pairs), [{ id: '9848877536', userId: '234765155' }]);
+});
+
+test('a block with no seller does not borrow the next one', () => {
+  // The homepage mixes item blocks with category and brand blocks, and those
+  // carry an entity and no seller. Without the guard the category would take
+  // the seller of the item after it and flag that card with a stranger.
+  const F = loadFeedMap();
+  const category = '\\"type\\":\\"category\\",\\"entity\\":{\\"id\\":1904,\\"title\\":\\"Femei\\"}';
+  const pairs = F.fromFlight(category + ',{' + FLIGHT_ITEM + '}');
+  assert.deepEqual(plain(pairs), [{ id: '9848877536', userId: '234765155' }]);
+});
+
+test('the paginated feed names its sellers too, in a different word', () => {
+  // api.vinted.ro/homepage/homepage as it answered on 2026-09-01: fifty blocks
+  // of one item each, and the seller is user_id rather than user.id.
+  const F = loadFeedMap();
+  const body = {
+    blocks: [
+      { type: 'item', entity: { id: '9848737794', title: 'Botki czarne', user_id: '3155965908' } },
+      { type: 'item', entity: { id: '9848737795', title: 'Nike', user_id: '3155965909' } },
+    ],
+    pagination: { next_page_token: 'next_row:12' },
+  };
+  assert.deepEqual(plain(F.fromApi(body)), [
+    { id: '9848737794', userId: '3155965908' },
+    { id: '9848737795', userId: '3155965909' },
+  ]);
+});
+
+test('an item photo is not mistaken for an item', () => {
+  // Every entity carries a photo object with its own id and no seller, so the
+  // walk has to want both ids on the same node rather than either of them.
+  const F = loadFeedMap();
+  const body = {
+    blocks: [{
+      entity: {
+        id: '9848737794',
+        user_id: '3155965908',
+        photo: { id: '0', image_no: 1, thumbnails: [{ id: '1' }, { id: '2' }] },
+      },
+    }],
+  };
+  assert.deepEqual(plain(F.fromApi(body)), [{ id: '9848737794', userId: '3155965908' }]);
+});
+
+test('a shape nobody recognises answers nothing rather than guessing', () => {
+  const F = loadFeedMap();
+  assert.deepEqual(plain(F.fromApi(null)), []);
+  assert.deepEqual(plain(F.fromApi({ code: 'BAD_REQUEST', message: 'Bad Request' })), []);
+  assert.deepEqual(plain(F.fromFlight('')), []);
+  assert.deepEqual(plain(F.fromFlight(undefined)), []);
+});
