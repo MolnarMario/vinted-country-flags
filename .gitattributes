@@ -1,0 +1,10 @@
+# Written on Windows, run everywhere. Normalise text to LF in the repository so
+# a clone on macOS or Linux does not see every file as modified.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.zip binary
+
+# PowerShell is happier with CRLF on the machine it runs on.
+*.ps1 text eol=crlf

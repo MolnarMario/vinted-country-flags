@@ -1,0 +1,175 @@
+{
+  "manifest_version": 3,
+  "name": "Vinted Country Flags",
+  "version": "2.0.0",
+  "description": "Shows the seller's country flag in the corner of every Vinted listing, in the grid and on the item page.",
+  "permissions": [
+    "storage"
+  ],
+  "host_permissions": [
+    "*://*.vinted.ro/*",
+    "*://*.vinted.fr/*",
+    "*://*.vinted.de/*",
+    "*://*.vinted.pl/*",
+    "*://*.vinted.co.uk/*",
+    "*://*.vinted.at/*",
+    "*://*.vinted.be/*",
+    "*://*.vinted.cz/*",
+    "*://*.vinted.dk/*",
+    "*://*.vinted.ee/*",
+    "*://*.vinted.es/*",
+    "*://*.vinted.fi/*",
+    "*://*.vinted.gr/*",
+    "*://*.vinted.hr/*",
+    "*://*.vinted.hu/*",
+    "*://*.vinted.ie/*",
+    "*://*.vinted.it/*",
+    "*://*.vinted.lt/*",
+    "*://*.vinted.lu/*",
+    "*://*.vinted.lv/*",
+    "*://*.vinted.nl/*",
+    "*://*.vinted.pt/*",
+    "*://*.vinted.se/*",
+    "*://*.vinted.si/*",
+    "*://*.vinted.sk/*",
+    "*://*.vinted.com/*",
+    "*://*.vinted.com.au/*",
+    "*://*.vinted.au/*"
+  ],
+  "background": {
+    "service_worker": "src/worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.vinted.ro/*",
+        "*://*.vinted.fr/*",
+        "*://*.vinted.de/*",
+        "*://*.vinted.pl/*",
+        "*://*.vinted.co.uk/*",
+        "*://*.vinted.at/*",
+        "*://*.vinted.be/*",
+        "*://*.vinted.cz/*",
+        "*://*.vinted.dk/*",
+        "*://*.vinted.ee/*",
+        "*://*.vinted.es/*",
+        "*://*.vinted.fi/*",
+        "*://*.vinted.gr/*",
+        "*://*.vinted.hr/*",
+        "*://*.vinted.hu/*",
+        "*://*.vinted.ie/*",
+        "*://*.vinted.it/*",
+        "*://*.vinted.lt/*",
+        "*://*.vinted.lu/*",
+        "*://*.vinted.lv/*",
+        "*://*.vinted.nl/*",
+        "*://*.vinted.pt/*",
+        "*://*.vinted.se/*",
+        "*://*.vinted.si/*",
+        "*://*.vinted.sk/*",
+        "*://*.vinted.com/*",
+        "*://*.vinted.com.au/*",
+        "*://*.vinted.au/*"
+      ],
+      "js": [
+        "src/page-fetch.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": [
+        "*://*.vinted.ro/*",
+        "*://*.vinted.fr/*",
+        "*://*.vinted.de/*",
+        "*://*.vinted.pl/*",
+        "*://*.vinted.co.uk/*",
+        "*://*.vinted.at/*",
+        "*://*.vinted.be/*",
+        "*://*.vinted.cz/*",
+        "*://*.vinted.dk/*",
+        "*://*.vinted.ee/*",
+        "*://*.vinted.es/*",
+        "*://*.vinted.fi/*",
+        "*://*.vinted.gr/*",
+        "*://*.vinted.hr/*",
+        "*://*.vinted.hu/*",
+        "*://*.vinted.ie/*",
+        "*://*.vinted.it/*",
+        "*://*.vinted.lt/*",
+        "*://*.vinted.lu/*",
+        "*://*.vinted.lv/*",
+        "*://*.vinted.nl/*",
+        "*://*.vinted.pt/*",
+        "*://*.vinted.se/*",
+        "*://*.vinted.si/*",
+        "*://*.vinted.sk/*",
+        "*://*.vinted.com/*",
+        "*://*.vinted.com.au/*",
+        "*://*.vinted.au/*"
+      ],
+      "js": [
+        "src/countries.js",
+        "src/price-currency.js",
+        "src/throttle.js",
+        "src/store.js",
+        "src/catalog-query.js",
+        "src/content.js"
+      ],
+      "css": [
+        "src/badge.css"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "flags/*.svg"
+      ],
+      "matches": [
+        "*://*.vinted.ro/*",
+        "*://*.vinted.fr/*",
+        "*://*.vinted.de/*",
+        "*://*.vinted.pl/*",
+        "*://*.vinted.co.uk/*",
+        "*://*.vinted.at/*",
+        "*://*.vinted.be/*",
+        "*://*.vinted.cz/*",
+        "*://*.vinted.dk/*",
+        "*://*.vinted.ee/*",
+        "*://*.vinted.es/*",
+        "*://*.vinted.fi/*",
+        "*://*.vinted.gr/*",
+        "*://*.vinted.hr/*",
+        "*://*.vinted.hu/*",
+        "*://*.vinted.ie/*",
+        "*://*.vinted.it/*",
+        "*://*.vinted.lt/*",
+        "*://*.vinted.lu/*",
+        "*://*.vinted.lv/*",
+        "*://*.vinted.nl/*",
+        "*://*.vinted.pt/*",
+        "*://*.vinted.se/*",
+        "*://*.vinted.si/*",
+        "*://*.vinted.sk/*",
+        "*://*.vinted.com/*",
+        "*://*.vinted.com.au/*",
+        "*://*.vinted.au/*"
+      ]
+    }
+  ],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Vinted Country Flags"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

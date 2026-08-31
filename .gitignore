@@ -1,0 +1,10 @@
+.harness*
+node_modules/
+*.zip
+
+# Research notes: measured rate limits and how they were probed. Kept local.
+docs/multi-domain.md
+
+# Local tooling state, not part of the extension.
+.aihive/
+.claude/

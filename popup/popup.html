@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Vinted Country Flags</title>
+<link rel="stylesheet" href="popup.css">
+<body>
+  <header>
+    <img src="../icons/icon48.png" alt="">
+    <h1>Vinted Country Flags</h1>
+  </header>
+
+  <label class="row toggle">
+    <span>Show flags</span>
+    <input type="checkbox" id="enabled" checked>
+  </label>
+
+  <div class="row"><span>Flags on this page</span><b id="page">–</b></div>
+  <div class="progress" id="progress-wrap" hidden>
+    <div class="bar"><i id="bar"></i></div>
+    <span id="progress-text"></span>
+  </div>
+  <div class="row" id="guessed-row" hidden><span>… from the price</span><b id="guessed">–</b></div>
+  <div class="row"><span>Sellers cached</span><b id="users">–</b></div>
+  <div class="row"><span>Items cached</span><b id="items">–</b></div>
+  <div class="row"><span>Requests sent</span><b id="sent">–</b></div>
+  <div class="row"><span>Request budget</span><b id="tokens">–</b></div>
+  <div class="row" id="circuit-row" hidden>
+    <span class="warn">Paused after pushback</span><b id="circuit-for">–</b>
+  </div>
+
+  <p class="status" id="status"></p>
+  <button id="clear">Clear cache</button>
+  <p class="note" id="note"></p>
+
+  <script src="popup.js"></script>
+</body>

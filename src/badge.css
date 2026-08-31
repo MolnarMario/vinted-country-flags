@@ -1,0 +1,53 @@
+/* The image container Vinted renders is already position:relative with
+   overflow:hidden, so the badge sits inside the picture like the favourite
+   button does. .vcf-anchor is a defensive fallback for containers that are not. */
+
+.vcf-anchor {
+  position: relative !important;
+}
+
+img.vcf-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 34px;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  border: 2px solid #fff;
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 3;
+  display: block;
+  background: #fff;
+  animation: vcf-fade 160ms ease-out;
+}
+
+/* The eurozone placeholder shown while a seller lookup is still queued. */
+img.vcf-badge--pending {
+  opacity: 0.55;
+}
+
+@keyframes vcf-fade {
+  from { opacity: 0; transform: scale(0.9); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Country line added under the seller box on a listing page. */
+.vcf-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: #4a4a4a;
+}
+
+.vcf-location img {
+  width: 20px;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 2px;
+  display: block;
+}
