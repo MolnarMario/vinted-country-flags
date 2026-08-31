@@ -12,6 +12,10 @@
 //      through one exchange rate, so the rounding gives the currency away
 //   6. the item page, which names the seller, followed by a seller lookup
 //
+// The homepage is its own case and uses a shorter ladder, because none of the
+// catalog steps reach it and all of its sellers are named for free. See
+// feed-map.js.
+//
 // Steps 1, 2 and 5 cost no request at all. On a domain with its own currency
 // they cover almost the whole page: 93 of 94 cards on vinted.ro, 83 of 96 on
 // vinted.pl.
@@ -26,6 +30,7 @@
 (() => {
   const COUNTRIES = globalThis.VCF_COUNTRIES;
   const CatalogQuery = globalThis.VCF_CatalogQuery;
+  const FeedMap = globalThis.VCF_FeedMap;
   const PriceCurrency = globalThis.VCF_PriceCurrency;
   const Store = globalThis.VCF_Store;
   const Throttle = globalThis.VCF_Throttle;
@@ -34,21 +39,31 @@
 
   const REQ = 'vcf-fetch-request';
   const RES = 'vcf-fetch-response';
-  // Vinted renders item cards in three shapes, identically on every domain:
-  // the selector below found 96 cards on vinted.pl, 93 on vinted.de, 94 on
-  // vinted.co.uk and 94 on vinted.ro. All three anchors are already
-  // position:relative with overflow:hidden, so the badge drops into the top
-  // right corner without touching Vinted's own layout.
+  const FEED = 'vcf-feed-items';
+  // Vinted renders item cards in four shapes, identically on every domain: the
+  // selector below found 96 cards on vinted.pl, 93 on vinted.de, 94 on
+  // vinted.co.uk and 94 on vinted.ro, plus 20 on the vinted.ro homepage and 12
+  // on the vinted.fr one. Every anchor is already position:relative with
+  // overflow:hidden, so the badge drops into the top right corner without
+  // touching Vinted's own layout.
   //   product-item-id-<id>--image   the main catalog grid
   //   item-<id>--image              a "more from this seller" row, one photo
   //   item-<id>--image-2            the same row's collage cards, top right cell
+  //   feed-item--image              the homepage, which numbers nothing
+  const FEED_IMAGE = 'feed-item--image';
+  const FEED_CARD_SEL = '[data-testid="feed-item"]';
   const CARD_SEL = [
     '[data-testid^="product-item-id-"][data-testid$="--image"]',
     '[data-testid^="item-"][data-testid$="--image"]',
     '[data-testid^="item-"][data-testid$="--image-2"]',
+    '[data-testid="' + FEED_IMAGE + '"]',
   ].join(', ');
   const ITEM_ID_RE = /^(?:product-item-id-|item-)(\d+)--image(?:-2)?$/;
   const MEMBER_RE = /\/member\/(\d+)/;
+  const ITEM_HREF_RE = /\/items\/(\d+)/;
+  // Vinted's homepage lives at the root and nowhere else. Every other page with
+  // a grid is under /catalog or /brand.
+  const onHomePath = () => location.pathname === '/' || location.pathname === '';
 
   const throttle = new Throttle();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -67,6 +82,11 @@
 
   const inFlightUsers = new Map(); // userId -> Promise
   const wantedUsers = new Map();   // userId -> Set of item ids still on screen
+  const feedUsers = new Map();     // itemId -> userId, homepage only
+
+  // Resolves once the catalog draws fired for the price fingerprint have
+  // landed. Only the homepage waits on it; everywhere else it is already done.
+  let ratesReady = Promise.resolve();
 
   // ---------------------------------------------------------------- fetching
 
@@ -76,7 +96,12 @@
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     const msg = event.data;
-    if (!msg || msg.type !== RES) return;
+    if (!msg) return;
+    if (msg.type === FEED) {
+      absorbFeed(msg.pairs);
+      return;
+    }
+    if (msg.type !== RES) return;
     const resolve = pendingReqs.get(msg.id);
     if (!resolve) return;
     pendingReqs.delete(msg.id);
@@ -93,6 +118,41 @@
         if (pendingReqs.delete(id)) resolve({ ok: false, status: 0, error: 'timeout' });
       }, timeoutMs);
     });
+  }
+
+  // -------------------------------------------------------- homepage feed
+
+  // Pairs arrive twice: once at boot from the server rendered document, and
+  // again from page-fetch.js every time the site pages the feed in. See
+  // feed-map.js for where each of those lives.
+  function absorbFeed(pairs) {
+    if (!Array.isArray(pairs)) return;
+    for (const pair of pairs) {
+      if (!pair || !pair.id || !pair.userId) continue;
+      if (!feedUsers.has(pair.id)) feedUsers.set(pair.id, pair.userId);
+    }
+  }
+
+  // The payload React hydrates the first screenful from is still sitting in the
+  // document, so this is a string scan and no request.
+  function absorbFlight() {
+    if (!FeedMap || !onHomePath()) return;
+    let text = '';
+    for (const el of document.querySelectorAll('script:not([src])')) text += el.textContent || '';
+    absorbFeed(FeedMap.fromFlight(text));
+  }
+
+  // The pagination response is read before the cards it describes are rendered,
+  // so the map is normally already filled by the time a card asks. Polling
+  // covers the case where it is not, rather than leaving that card blank for
+  // good: nothing else on the homepage can name its seller.
+  async function feedUser(itemId) {
+    for (let i = 0; i < 10; i++) {
+      const hit = feedUsers.get(itemId);
+      if (hit) return hit;
+      await sleep(50);
+    }
+    return null;
   }
 
   // ----------------------------------------------------------- catalog layer
@@ -113,11 +173,34 @@
   // matches for a whole extra request.
   const CATALOG_ROUNDS = 4;
 
+  // The homepage asks the same endpoint for a different reason. Its feed shares
+  // no items with the catalog feed at all (0 of 20 on vinted.ro), so nothing
+  // here is drawn to match a card. It is drawn for the exchange rates: every
+  // converted item in the response is one rate observed for free, and the price
+  // fingerprint cannot read a single card until it has them. One draw of 96 on
+  // vinted.ro carried 57 conversions.
+  //
+  // Two rounds rather than one because the fingerprint refuses to answer until
+  // it knows the euro rate, and that one draw held two euro sellers, one short
+  // of the three it takes to trust a rate.
+  const HOME_ROUNDS = 2;
+
   // The catalog endpoint is not in the same bucket as /users, or is far more
   // generous: six rapid calls answered 200 while /users was still 429ing. So
   // rounds pace themselves locally instead of spending seller-lookup tokens,
   // which on a euro domain are the scarce thing.
   const CATALOG_GAP_MS = 1000;
+
+  // How many draws this page is worth. A euro domain gets none on the homepage:
+  // the fingerprint can never work where every seller prices in euro, and every
+  // seller the response names comes back as an unresolved 'EU', so the two
+  // requests would buy nothing at all.
+  function roundBudget() {
+    if (CatalogQuery.isCatalogPath(location.pathname)) return CATALOG_ROUNDS;
+    const buyer = COUNTRIES.buyerCurrency;
+    if (onHomePath() && buyer && buyer !== 'EUR') return HOME_ROUNDS;
+    return 0;
+  }
 
   function absorbCatalog(body, map) {
     if (!body || !Array.isArray(body.items)) return;
@@ -150,7 +233,7 @@
   // Resolves once round n has landed. Rounds are shared by every card on the
   // page, so a hundred misses still cost one extra request each.
   function catalogRound(n) {
-    if (n >= CATALOG_ROUNDS) return catalogPromise;
+    if (n < 0 || n >= roundBudget()) return catalogPromise;
     if (catalogRounds[n]) return catalogRounds[n];
 
     const mine = catalogMap;
@@ -173,8 +256,9 @@
     return catalogRounds[n];
   }
 
-  // The first round, mirroring the filters already in the URL.
-  function loadCatalog() {
+  // Kicks the first `rounds` draws and resolves when the last of them lands,
+  // mirroring the filters already in the URL.
+  function loadCatalog(rounds) {
     const key = location.pathname + location.search;
     if (catalogKey !== key) {
       catalogKey = key;
@@ -182,8 +266,8 @@
       catalogRounds = [];
       catalogPromise = Promise.resolve(catalogMap);
     }
-    if (!CatalogQuery.isCatalogPath(location.pathname)) return catalogPromise;
-    return catalogRound(0);
+    const want = Math.min(rounds || 1, roundBudget());
+    return catalogRound(want - 1);
   }
 
   // -------------------------------------------------------------- user layer
@@ -269,12 +353,21 @@
     return value > 0 ? value : null;
   }
 
-  function countryFromPrice(itemId) {
-    if (!PriceCurrency || !PriceCurrency.ready()) return null;
-    const el = document.querySelector(
+  // A catalog card numbers its price element the way it numbers its photo. A
+  // homepage card numbers nothing, so its price is found by walking up to the
+  // card and back down.
+  function priceElement(itemId, container) {
+    const home = container.closest(FEED_CARD_SEL);
+    if (home) return home.querySelector('[data-testid="feed-item--price-text"]');
+    return document.querySelector(
       '[data-testid="product-item-id-' + itemId + '--price-text"], ' +
         '[data-testid="item-' + itemId + '--price-text"]'
     );
+  }
+
+  function countryFromPrice(itemId, container) {
+    if (!PriceCurrency || !PriceCurrency.ready()) return null;
+    const el = priceElement(itemId, container);
     if (!el) return null;
     const price = parsePrice(el.textContent);
     if (price == null) return null;
@@ -375,7 +468,9 @@
   function sellerIdFromDom(node, testid) {
     const onMemberPage = location.pathname.match(MEMBER_RE);
     if (onMemberPage) return onMemberPage[1];
-    if (testid.startsWith('product-item-id-')) return null;
+    // A homepage card links to nobody either, and its seller comes from
+    // feed-map.js instead.
+    if (testid.startsWith('product-item-id-') || testid === FEED_IMAGE) return null;
 
     // A closet row links to its seller three times over: the avatar, the
     // username and the "see seller" button. So the test is not how many links
@@ -399,11 +494,24 @@
     return null;
   }
 
+  // Catalog and closet cards carry the item id in the anchor's own testid.
+  // Homepage cards do not: every one of them uses the same three testids, so
+  // the id comes off the link that covers the photo.
+  function cardItemId(container, testid) {
+    const numbered = testid.match(ITEM_ID_RE);
+    if (numbered) return numbered[1];
+    if (testid !== FEED_IMAGE) return null;
+    const card = container.closest(FEED_CARD_SEL);
+    const link = card && card.querySelector('a[href*="/items/"]');
+    const href = (link && link.getAttribute('href')) || '';
+    const hit = href.match(ITEM_HREF_RE);
+    return hit ? hit[1] : null;
+  }
+
   async function resolveCard(container) {
     const testid = container.getAttribute('data-testid') || '';
-    const m = testid.match(ITEM_ID_RE);
-    if (!m) return;
-    const itemId = m[1];
+    const itemId = cardItemId(container, testid);
+    if (!itemId) return;
     coverage.seen.add(itemId);
 
     const flag = (cc, city) => {
@@ -418,19 +526,31 @@
       return;
     }
 
-    // 2. and 3. what the catalog API says about this item
-    let map = await loadCatalog();
+    const onCatalog = CatalogQuery.isCatalogPath(location.pathname);
+    const onHome = onHomePath();
+
+    // 2. and 3. what the catalog API says about this item. The homepage draws
+    //    from a different pool, so it never asks.
+    let map = onCatalog ? await loadCatalog() : null;
     let entry = map && map.get(itemId);
 
     // 4. a closet row card is never in the catalog response, and it names its
-    //    seller in the markup, so take that instead of asking again
+    //    seller in the markup, so take that instead of asking again. A homepage
+    //    card is named by the feed the page was rendered from.
     let userId = (entry && entry.userId) || sellerIdFromDom(container, testid);
+    if (!userId && onHome) userId = await feedUser(itemId);
 
     // 5. the price on the card. Free and instant, so it paints now and the
     //    slower steps below get a chance to overwrite it with a certain answer.
+    //
+    //    On the homepage this is the step that matters, and it is worth waiting
+    //    for the rates that make it work. Every homepage card names its seller,
+    //    so without the fingerprint all seventy of them queue a lookup and the
+    //    grid fills in over the next minute at one seller a second.
     let guess = null;
-    if (!entry && !userId) {
-      guess = countryFromPrice(itemId);
+    if (onHome) await ratesReady;
+    if (!entry && (!userId || onHome)) {
+      guess = countryFromPrice(itemId, container);
       if (guess && COUNTRIES.isResolved(guess)) {
         flag(guess);
         coverage.guessed.add(itemId);
@@ -441,7 +561,6 @@
 
     // 6. a card missing from the first draw. Ask for another round rather than
     //    give up: the card is in the pool, just not in the sample we got.
-    const onCatalog = CatalogQuery.isCatalogPath(location.pathname);
     for (let n = 1; onCatalog && !entry && !userId && n < CATALOG_ROUNDS; n++) {
       if (!container.isConnected) return;
       map = await catalogRound(n);
@@ -476,6 +595,12 @@
       Store.putItem(itemId, banked.cc);
       return;
     }
+
+    // The price already answered and the seller is not banked, so a lookup
+    // would only confirm a guess that is right 997 times in 1000. On the
+    // homepage that is the whole difference between a grid that fills in at
+    // once and one that fills in at one card a second.
+    if (guess) return;
 
     if (throttle.circuitOpen) {
       // Cannot ask. Show what the currency told us rather than nothing.
@@ -628,6 +753,11 @@
   async function start() {
     booted = await boot();
     if (!booted || !enabled) return;
+    // Reading the first screenful's sellers out of the document, and asking for
+    // the rates the fingerprint reads the rest with. Both are homepage only and
+    // neither blocks the scan; the cards wait on ratesReady themselves.
+    absorbFlight();
+    if (onHomePath() && roundBudget() > 0) ratesReady = loadCatalog(HOME_ROUNDS);
     mutations.observe(document.body, { childList: true, subtree: true });
     scan();
   }

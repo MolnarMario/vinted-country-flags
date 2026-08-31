@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Vinted Country Flags",
-  "version": "2.0.0",
-  "description": "Shows the seller's country flag in the corner of every Vinted listing, in the grid and on the item page.",
+  "version": "2.1.0",
+  "description": "Shows the seller's country flag in the corner of every Vinted listing, on the homepage, in the grid and on the item page.",
   "permissions": [
     "storage"
   ],
@@ -72,6 +72,7 @@
         "*://*.vinted.au/*"
       ],
       "js": [
+        "src/feed-map.js",
         "src/page-fetch.js"
       ],
       "run_at": "document_start",
@@ -115,6 +116,7 @@
         "src/throttle.js",
         "src/store.js",
         "src/catalog-query.js",
+        "src/feed-map.js",
         "src/content.js"
       ],
       "css": [

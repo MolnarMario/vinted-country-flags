@@ -68,6 +68,7 @@ const style = `(()=>{const s=document.createElement('style');s.textContent=${JSO
 const worker = `(()=>{${strip(readFileSync('src/worker.js', 'utf8'))}})();`;
 
 const libs = [shim, style,
+  strip(readFileSync('src/feed-map.js', 'utf8')),
   strip(readFileSync('src/page-fetch.js', 'utf8')),
   worker,
   strip(readFileSync('src/countries.js', 'utf8')),
