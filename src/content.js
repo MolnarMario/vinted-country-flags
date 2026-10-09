@@ -3,39 +3,42 @@
 //
 // Resolution ladder, cheapest first. Each card stops at the first step that answers:
 //   1. the item is already in the shared cache
-//   2. the catalog API response for this page pins the country by seller currency
-//   3. the card sits in a "more from this seller" row, which names its seller,
-//      so one lookup answers the whole row
-//   4. the same catalog query, asked again: the feed is shuffled, so a card
-//      missing from the first draw is usually in the second or third
-//   5. the price printed on the card, which is the seller's own number run
-//      through one exchange rate, so the rounding gives the currency away
-//   6. the item page, which names the seller, followed by a seller lookup
+//   2. the seller is named for free: by the React payload the page was rendered
+//      from, by the grid XHR the site made for itself (see feed-map.js), or by
+//      the markup of a "more from this seller" row
+//   3. that seller is already in the shared cache
+//   4. the price printed on the card, which is the seller's own number run
+//      through one exchange rate, so the rounding gives the currency away.
+//      Only once some rates are known. They are fitted from the cards that
+//      steps 1, 3 and 5 settle, see teachPrice and price-currency.js
+//   5. one /api/v2/users lookup for the seller, paced by the shared bucket
 //
-// The homepage is its own case and uses a shorter ladder, because none of the
-// catalog steps reach it and all of its sellers are named for free. See
-// feed-map.js.
+// Steps 1 to 4 cost no request at all.
 //
-// Steps 1, 2 and 5 cost no request at all. On a domain with its own currency
-// they cover almost the whole page: 93 of 94 cards on vinted.ro, 83 of 96 on
-// vinted.pl.
+// Up to 2026-10-08 a /api/v2/catalog/items call answered most of a non-euro
+// grid for free, because every converted item named its seller's currency.
+// Vinted retired that endpoint (it answers 404) and the grid's new source
+// carries no conversion object, so every seller nobody has cached costs a
+// lookup until step 4 has learned its rates, and on a euro domain always.
+// That is why the IntersectionObserver matters: the cards actually on screen
+// are resolved first and scrolling pays for the rest. Past the bucket's burst
+// of 20 that is one lookup per 1.25 s, which is why a page used to fill in
+// fast at the top and crawl further down.
 //
-// The eighteen euro markets are the hard case and step 2 does nothing there.
-// Every seller prices in euro, so `conversion` is null on every item (0 out of
-// 259 on vinted.fr, 0 out of 271 on vinted.de) and the currency only ever says
-// "somewhere in the eurozone". Those cards each cost a seller lookup, which is
-// why the IntersectionObserver matters: the twenty cards actually on screen get
-// resolved first and scrolling pays for the rest.
+// What this file no longer does, on purpose: it does not fetch item pages. A
+// two megabyte HTML document per card is the kind of traffic that earns the
+// visitor Vinted's "Client Challenge" page. Worse, the regex that read the
+// seller off it could match the visitor's own profile link, which the page
+// also carries, and that put the visitor's flag on other people's items.
 
 (() => {
   const COUNTRIES = globalThis.VCF_COUNTRIES;
-  const CatalogQuery = globalThis.VCF_CatalogQuery;
   const FeedMap = globalThis.VCF_FeedMap;
   const PriceCurrency = globalThis.VCF_PriceCurrency;
   const Store = globalThis.VCF_Store;
   const Throttle = globalThis.VCF_Throttle;
 
-  if (!COUNTRIES || !CatalogQuery || !Store || !Throttle) return;
+  if (!COUNTRIES || !Store || !Throttle) return;
 
   const REQ = 'vcf-fetch-request';
   const RES = 'vcf-fetch-response';
@@ -61,32 +64,25 @@
   const ITEM_ID_RE = /^(?:product-item-id-|item-)(\d+)--image(?:-2)?$/;
   const MEMBER_RE = /\/member\/(\d+)/;
   const ITEM_HREF_RE = /\/items\/(\d+)/;
-  // Vinted's homepage lives at the root and nowhere else. Every other page with
-  // a grid is under /catalog or /brand.
-  const onHomePath = () => location.pathname === '/' || location.pathname === '';
 
   const throttle = new Throttle();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   let enabled = true;
   let booted = false;
-  let catalogMap = null;      // itemId -> { cc, userId }
-  let catalogKey = null;      // the path+search the map was built for
-  let catalogPromise = Promise.resolve(null);
-  let catalogRounds = [];     // index n = the promise for round n landing
-  let catalogFetches = 0;
   // Which cards on this page view got a real flag, so the popup can say how
   // much of the grid the extension actually answered.
   const coverage = { seen: new Set(), flagged: new Set(), guessed: new Set() };
   let lastHref = location.href;
 
   const inFlightUsers = new Map(); // userId -> Promise
-  const wantedUsers = new Map();   // userId -> Set of item ids still on screen
-  const feedUsers = new Map();     // itemId -> userId, homepage only
-
-  // Resolves once the catalog draws fired for the price fingerprint have
-  // landed. Only the homepage waits on it; everywhere else it is already done.
-  let ratesReady = Promise.resolve();
+  // userId -> Set of the cards still waiting on that seller. Cards, not item
+  // ids: the same item can sit in the grid and in a closet row at once, and one
+  // of them scrolling away must not cancel the lookup the other still needs.
+  const wantedUsers = new Map();
+  // itemId -> userId, from the document and from the site's own grid XHRs.
+  // An item never changes hands, so this survives client side navigation.
+  const sellers = new Map();
 
   // ---------------------------------------------------------------- fetching
 
@@ -120,164 +116,81 @@
     });
   }
 
-  // -------------------------------------------------------- homepage feed
+  // ------------------------------------------------------------- grid feeds
 
   // Pairs arrive twice: once at boot from the server rendered document, and
-  // again from page-fetch.js every time the site pages the feed in. See
-  // feed-map.js for where each of those lives.
+  // again from page-fetch.js every time the site loads a grid. See feed-map.js
+  // for where each of those lives.
   function absorbFeed(pairs) {
     if (!Array.isArray(pairs)) return;
+    const converted = [];
+    const bank = [];
     for (const pair of pairs) {
       if (!pair || !pair.id || !pair.userId) continue;
-      if (!feedUsers.has(pair.id)) feedUsers.set(pair.id, pair.userId);
+      if (!sellers.has(pair.id)) {
+        sellers.set(pair.id, pair.userId);
+        sellerArrived(pair.id);
+      }
+      if (pair.currency) COUNTRIES.setBuyerCurrency(pair.currency);
+      // Only an item that actually carries a conversion says anything about
+      // its seller's currency. The new grid endpoint leaves the field out
+      // altogether, and reading "absent" as "prices in the buyer's currency"
+      // would flag every foreign seller as a local.
+      if (pair.conversion) {
+        converted.push(pair);
+        const cc = COUNTRIES.fromConversion(pair.conversion);
+        if (COUNTRIES.isResolved(cc)) bank.push({ id: pair.userId, cc });
+      }
     }
+    if (PriceCurrency && converted.length) PriceCurrency.learn(converted);
+    if (bank.length) Store.bankUsers(bank);
   }
 
   // The payload React hydrates the first screenful from is still sitting in the
   // document, so this is a string scan and no request.
   function absorbFlight() {
-    if (!FeedMap || !onHomePath()) return;
+    if (!FeedMap) return;
     let text = '';
     for (const el of document.querySelectorAll('script:not([src])')) text += el.textContent || '';
     absorbFeed(FeedMap.fromFlight(text));
   }
 
-  // The pagination response is read before the cards it describes are rendered,
-  // so the map is normally already filled by the time a card asks. Polling
-  // covers the case where it is not, rather than leaving that card blank for
-  // good: nothing else on the homepage can name its seller.
-  async function feedUser(itemId) {
-    for (let i = 0; i < 10; i++) {
-      const hit = feedUsers.get(itemId);
+  // The grid response is read before the cards it describes are rendered, so
+  // the map is normally already filled by the time a card asks. Polling covers
+  // the case where it is not, rather than leaving that card blank for good.
+  async function sellerFromFeed(itemId) {
+    for (let i = 0; i < 20; i++) {
+      const hit = sellers.get(itemId);
       if (hit) return hit;
       await sleep(50);
     }
     return null;
   }
 
-  // ----------------------------------------------------------- catalog layer
-
-  // Why the same query goes out more than once.
-  //
-  // /api/v2/catalog/items?order=relevance does not return a fixed page. It
-  // draws 96 items out of a pool half again as large and shuffles them, so two
-  // identical calls a second apart share only about three quarters of their
-  // items. The grid the server rendered is one such draw, and a quarter of the
-  // cards on screen are simply absent from ours.
-  //
-  // Repeating the identical query is what closes the gap, because each repeat
-  // is a fresh draw from the same pool. Measured on
-  // /catalog/3480-coffee-tea-and-espresso-making, cumulative grid coverage per
-  // round ran 68, 74, 90, 93 out of 96 and then stopped improving. Paginating
-  // does not help at all: page 2 is drawn from the same pool and added five
-  // matches for a whole extra request.
-  const CATALOG_ROUNDS = 4;
-
-  // The homepage asks the same endpoint for a different reason. Its feed shares
-  // no items with the catalog feed at all (0 of 20 on vinted.ro), so nothing
-  // here is drawn to match a card. It is drawn for the exchange rates: every
-  // converted item in the response is one rate observed for free, and the price
-  // fingerprint cannot read a single card until it has them. One draw of 96 on
-  // vinted.ro carried 57 conversions.
-  //
-  // Two rounds rather than one because the fingerprint refuses to answer until
-  // it knows the euro rate, and that one draw held two euro sellers, one short
-  // of the three it takes to trust a rate.
-  const HOME_ROUNDS = 2;
-
-  // The catalog endpoint is not in the same bucket as /users, or is far more
-  // generous: six rapid calls answered 200 while /users was still 429ing. So
-  // rounds pace themselves locally instead of spending seller-lookup tokens,
-  // which on a euro domain are the scarce thing.
-  const CATALOG_GAP_MS = 1000;
-
-  // How many draws this page is worth. A euro domain gets none on the homepage:
-  // the fingerprint can never work where every seller prices in euro, and every
-  // seller the response names comes back as an unresolved 'EU', so the two
-  // requests would buy nothing at all.
-  function roundBudget() {
-    if (CatalogQuery.isCatalogPath(location.pathname)) return CATALOG_ROUNDS;
-    const buyer = COUNTRIES.buyerCurrency;
-    if (onHomePath() && buyer && buyer !== 'EUR') return HOME_ROUNDS;
-    return 0;
-  }
-
-  function absorbCatalog(body, map) {
-    if (!body || !Array.isArray(body.items)) return;
-
-    // What the buyer is being shown, straight from the response. This is what a
-    // null conversion means, and it beats the guess taken from the page
-    // language at boot.
-    const first = body.items.find((it) => it && it.price && it.price.currency_code);
-    if (first) COUNTRIES.setBuyerCurrency(first.price.currency_code);
-
-    // Every converted item in here carries the seller's own price beside ours,
-    // which is one exchange rate observed for free. See price-currency.js.
-    if (PriceCurrency) PriceCurrency.learn(body.items);
-
-    // Each response also names 96 sellers. Currency pins most of them on a
-    // domain with its own currency, so bank those: a closet row by a seller who
-    // also has a grid item then costs no request at all, here or on any later
-    // page, on any Vinted domain, because the cache is shared and seller ids
-    // are global.
-    const bank = [];
-    for (const item of body.items) {
-      const cc = COUNTRIES.fromConversion(item.conversion);
-      const userId = item.user && item.user.id ? String(item.user.id) : null;
-      map.set(String(item.id), { cc, userId });
-      if (userId && COUNTRIES.isResolved(cc)) bank.push({ id: userId, cc });
-    }
-    if (bank.length) Store.bankUsers(bank);
-  }
-
-  // Resolves once round n has landed. Rounds are shared by every card on the
-  // page, so a hundred misses still cost one extra request each.
-  function catalogRound(n) {
-    if (n < 0 || n >= roundBudget()) return catalogPromise;
-    if (catalogRounds[n]) return catalogRounds[n];
-
-    const mine = catalogMap;
-    const path = '/api/v2/catalog/items?' + CatalogQuery.build(location);
-    const send = () => {
-      catalogFetches++;
-      return pageFetch(path);
-    };
-
-    const run =
-      n === 0 ? send() : catalogRound(n - 1).then(() => sleep(CATALOG_GAP_MS)).then(send);
-
-    catalogRounds[n] = run
-      .then((res) => {
-        if (res && res.ok) absorbCatalog(res.body, mine);
-        return mine;
-      })
-      .catch(() => mine);
-
-    return catalogRounds[n];
-  }
-
-  // Kicks the first `rounds` draws and resolves when the last of them lands,
-  // mirroring the filters already in the URL.
-  function loadCatalog(rounds) {
-    const key = location.pathname + location.search;
-    if (catalogKey !== key) {
-      catalogKey = key;
-      catalogMap = new Map();
-      catalogRounds = [];
-      catalogPromise = Promise.resolve(catalogMap);
-    }
-    const want = Math.min(rounds || 1, roundBudget());
-    return catalogRound(want - 1);
-  }
-
   // -------------------------------------------------------------- user layer
 
+  // What a lookup resolves to when nobody wanted it any more by its turn.
+  const DROPPED = { dropped: true };
+
+  // A lookup is shared by every card selling for that seller, and it is
+  // dropped once none of the registered ones wants it. A card still on its way
+  // here (awaiting the cache) can then join the dropped promise and get
+  // nothing back, so a caller that is still registered asks again once.
   async function lookupUser(userId) {
-    const cached = await Store.getUser(userId);
-    if (cached) return cached;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cached = await Store.getUser(userId);
+      if (cached) return cached;
+      const p = inFlightUsers.get(userId) || startLookup(userId);
+      const rec = await p;
+      if (rec !== DROPPED) return rec;
+      if (inFlightUsers.get(userId) === p) inFlightUsers.delete(userId);
+      const want = wantedUsers.get(userId);
+      if (!want || want.size === 0) return null;
+    }
+    return null;
+  }
 
-    if (inFlightUsers.has(userId)) return inFlightUsers.get(userId);
-
+  function startLookup(userId) {
     const p = throttle
       .submit('user:' + userId, async () => {
         // Bail out without spending a token if every card that wanted this
@@ -287,6 +200,7 @@
         return pageFetch('/api/v2/users/' + userId);
       })
       .then((res) => {
+        if (res && res.skipped) return DROPPED;
         const user = res && res.body && res.body.user;
         // Not user.country_code. That is Vinted's own code, and Britain comes
         // back as "UK", which is not an ISO country and resolves to no flag.
@@ -298,22 +212,25 @@
         // the city needs the guard.
         return Store.putUser(userId, cc, (user && user.city) || null);
       })
-      .catch(() => null);
+      .catch((e) => (e && e.message === 'cancelled' ? DROPPED : null));
 
     inFlightUsers.set(userId, p);
-    p.then(() => inFlightUsers.delete(userId), () => inFlightUsers.delete(userId));
+    // Only this lookup's own entry: a retry may already have replaced it.
+    p.then(() => {
+      if (inFlightUsers.get(userId) === p) inFlightUsers.delete(userId);
+    });
     return p;
   }
 
-  function wantUser(userId, itemId) {
+  function wantUser(userId, card) {
     if (!wantedUsers.has(userId)) wantedUsers.set(userId, new Set());
-    wantedUsers.get(userId).add(itemId);
+    wantedUsers.get(userId).add(card);
   }
 
-  function unwantUser(userId, itemId) {
+  function unwantUser(userId, card) {
     const set = wantedUsers.get(userId);
     if (!set) return;
-    set.delete(itemId);
+    set.delete(card);
     if (set.size === 0) {
       wantedUsers.delete(userId);
       throttle.cancel((key) => key === 'user:' + userId);
@@ -365,38 +282,74 @@
     );
   }
 
+  function cardPrice(itemId, container) {
+    const el = priceElement(itemId, container);
+    return el ? parsePrice(el.textContent) : null;
+  }
+
   function countryFromPrice(itemId, container) {
     if (!PriceCurrency || !PriceCurrency.ready()) return null;
-    const el = priceElement(itemId, container);
-    if (!el) return null;
-    const price = parsePrice(el.textContent);
+    const price = cardPrice(itemId, container);
     if (price == null) return null;
     const currency = PriceCurrency.currencyFor(price);
     if (!currency) return null;
     return COUNTRIES.fromCurrency(currency);
   }
 
-  // ---------------------------------------------------------- item page probe
+  // Every card whose seller is known for certain is a worked example for the
+  // fingerprint: a price in our currency next to the currency it was set in.
+  // That is how the rates get learned now that no conversion arrives (see
+  // price-currency.js). A guess is never fed back, or one wrong rate would
+  // keep confirming itself.
+  const taught = new Set();
 
-  // Last resort for a grid card nothing else reached. The item page names its
-  // seller and nobody else, so one fetch turns the card into a seller id, and
-  // the seller is then cached for every other item of theirs.
-  //
-  // It is a two megabyte document for one number, so it is capped hard: a page
-  // view gets ITEM_PROBE_BUDGET of them and no more. Nothing cheaper exists.
-  // The item page HTML carries no country_code, no country_id, no city, and no
-  // state blob; Vinted never tells a buyer where the seller is.
-  const ITEM_PROBE_BUDGET = 6;
-  let itemProbes = 0;
+  function teachPrice(itemId, container, cc) {
+    if (!PriceCurrency || !PriceCurrency.observe || taught.has(itemId)) return;
+    const currency = COUNTRIES.currencyOf(cc);
+    const price = currency && cardPrice(itemId, container);
+    if (price == null) return;
+    taught.add(itemId);
+    PriceCurrency.observe(price, currency);
+    scheduleRecheck();
+  }
 
-  async function sellerIdFromItemPage(itemId) {
-    if (itemProbes >= ITEM_PROBE_BUDGET || throttle.circuitOpen) return null;
-    itemProbes++;
-    try {
-      const res = await throttle.submit('item:' + itemId, () => pageFetch('/items/' + itemId));
-      return (res && res.memberId) || null;
-    } catch (e) {
-      return null;
+  // Cards queued for a lookup were queued while the fingerprint could not
+  // answer them. A new rate may change that, and a card the price can name
+  // gives its place in the queue back. Cheap: one division per rate per card.
+  let recheckTimer = null;
+
+  function scheduleRecheck() {
+    if (recheckTimer) return;
+    recheckTimer = setTimeout(recheckQueued, 300);
+  }
+
+  function recheckQueued() {
+    recheckTimer = null;
+    if (!PriceCurrency || !PriceCurrency.ready()) return;
+    for (const [userId, cards] of [...wantedUsers]) {
+      for (const card of [...cards]) {
+        if (typeof card === 'string' || !card.isConnected || card.dataset.vcf) continue;
+        const testid = card.getAttribute('data-testid') || '';
+        const itemId = cardItemId(card, testid);
+        const guess = itemId && countryFromPrice(itemId, card);
+        if (!guess || !COUNTRIES.isResolved(guess)) continue;
+        paint(card, guess);
+        coverage.flagged.add(itemId);
+        coverage.guessed.add(itemId);
+        unwantUser(userId, card);
+      }
+    }
+    for (const [itemId, cards] of [...awaitingSeller]) {
+      for (const card of [...cards]) {
+        if (!card.isConnected || card.dataset.vcf) continue;
+        const guess = countryFromPrice(itemId, card);
+        if (!guess || !COUNTRIES.isResolved(guess)) continue;
+        paint(card, guess);
+        coverage.flagged.add(itemId);
+        coverage.guessed.add(itemId);
+        cards.delete(card);
+      }
+      if (cards.size === 0) awaitingSeller.delete(itemId);
     }
   }
 
@@ -452,7 +405,7 @@
 
   // --------------------------------------------------------- card resolution
 
-  // Only two kinds of card name their seller without a request:
+  // Only two kinds of card name their seller in the markup:
   //   * anything on a /member/ page, which belongs to that member
   //   * a closet row card, sitting in a block whose header links to the one
   //     seller the row is showing
@@ -468,7 +421,7 @@
   function sellerIdFromDom(node, testid) {
     const onMemberPage = location.pathname.match(MEMBER_RE);
     if (onMemberPage) return onMemberPage[1];
-    // A homepage card links to nobody either, and its seller comes from
+    // Grid and homepage cards link to nobody, and their sellers come from
     // feed-map.js instead.
     if (testid.startsWith('product-item-id-') || testid === FEED_IMAGE) return null;
 
@@ -514,9 +467,15 @@
     if (!itemId) return;
     coverage.seen.add(itemId);
 
+    // Only certain answers come through here, so each one also teaches the
+    // fingerprint. The price guess below paints directly.
     const flag = (cc, city) => {
       paint(container, cc, city);
-      if (COUNTRIES.isResolved(cc)) coverage.flagged.add(itemId);
+      if (COUNTRIES.isResolved(cc)) {
+        coverage.flagged.add(itemId);
+        coverage.guessed.delete(itemId);
+        teachPrice(itemId, container, cc);
+      }
     };
 
     // 1. already known, possibly from another Vinted domain entirely
@@ -526,102 +485,112 @@
       return;
     }
 
-    const onCatalog = CatalogQuery.isCatalogPath(location.pathname);
-    const onHome = onHomePath();
+    // 2. who is selling it, without asking anyone
+    const userId = sellerIdFromDom(container, testid) || (await sellerFromFeed(itemId));
 
-    // 2. and 3. what the catalog API says about this item. The homepage draws
-    //    from a different pool, so it never asks.
-    let map = onCatalog ? await loadCatalog() : null;
-    let entry = map && map.get(itemId);
-
-    // 4. a closet row card is never in the catalog response, and it names its
-    //    seller in the markup, so take that instead of asking again. A homepage
-    //    card is named by the feed the page was rendered from.
-    let userId = (entry && entry.userId) || sellerIdFromDom(container, testid);
-    if (!userId && onHome) userId = await feedUser(itemId);
-
-    // 5. the price on the card. Free and instant, so it paints now and the
-    //    slower steps below get a chance to overwrite it with a certain answer.
-    //
-    //    On the homepage this is the step that matters, and it is worth waiting
-    //    for the rates that make it work. Every homepage card names its seller,
-    //    so without the fingerprint all seventy of them queue a lookup and the
-    //    grid fills in over the next minute at one seller a second.
-    let guess = null;
-    if (onHome) await ratesReady;
-    if (!entry && (!userId || onHome)) {
-      guess = countryFromPrice(itemId, container);
-      if (guess && COUNTRIES.isResolved(guess)) {
-        flag(guess);
-        coverage.guessed.add(itemId);
-      } else {
-        guess = null;
+    // 3. a seller already known, from any tab and any domain
+    if (userId) {
+      const banked = await Store.getUser(userId);
+      if (banked) {
+        flag(banked.cc, banked.city);
+        Store.putItem(itemId, banked.cc);
+        return;
       }
     }
 
-    // 6. a card missing from the first draw. Ask for another round rather than
-    //    give up: the card is in the pool, just not in the sample we got.
-    for (let n = 1; onCatalog && !entry && !userId && n < CATALOG_ROUNDS; n++) {
-      if (!container.isConnected) return;
-      map = await catalogRound(n);
-      entry = map && map.get(itemId);
-      userId = entry && entry.userId;
-    }
-
-    if (entry && COUNTRIES.isResolved(entry.cc)) {
-      coverage.guessed.delete(itemId);
-      flag(entry.cc);
-      Store.putItem(itemId, entry.cc);
+    // 4. the price on the card. It is never written to the item cache: a later
+    //    visit may get the certain answer, and a stored guess would short
+    //    circuit that for thirty days. A lookup would only confirm a guess
+    //    that is right 997 times in 1000, so none is spent.
+    const guess = countryFromPrice(itemId, container);
+    if (guess && COUNTRIES.isResolved(guess)) {
+      paint(container, guess);
+      coverage.flagged.add(itemId);
+      coverage.guessed.add(itemId);
       return;
     }
 
-    // 7. nothing named this seller, so pay for the item page to name them.
-    //    Skipped when the price already answered: a two megabyte fetch is not
-    //    worth spending to confirm a guess that is right 997 times in 1000.
-    if (!userId && !entry && !guess && onCatalog && container.isConnected) {
-      userId = await sellerIdFromItemPage(itemId);
-    }
-
-    // The price guess stands. It is never written to the item cache: a later
-    // visit may draw the certain answer from the catalog, and a stored guess
-    // would short circuit that for thirty days.
-    if (!userId) return;
-
-    // A seller read off the page may already be banked from a catalog response.
-    const banked = await Store.getUser(userId);
-    if (banked) {
-      coverage.guessed.delete(itemId);
-      flag(banked.cc, banked.city);
-      Store.putItem(itemId, banked.cc);
+    if (!userId) {
+      // Nobody has named this seller yet. A grid response that lands late
+      // will, so the card waits for it rather than staying blank on screen.
+      awaitSeller(itemId, container);
       return;
     }
 
-    // The price already answered and the seller is not banked, so a lookup
-    // would only confirm a guess that is right 997 times in 1000. On the
-    // homepage that is the whole difference between a grid that fills in at
-    // once and one that fills in at one card a second.
-    if (guess) return;
-
+    // 5. one lookup. While Vinted is pushing back nothing goes out, and the
+    //    card is put aside to try again once the circuit closes.
     if (throttle.circuitOpen) {
-      // Cannot ask. Show what the currency told us rather than nothing.
-      if (entry && entry.cc === 'EU') flag('EU');
+      deferCard(container);
       return;
     }
 
-    // Show the neutral eurozone marker straight away rather than leaving a gap,
-    // then swap in the real flag once the lookup lands. On a euro domain this
-    // is what every card looks like for its first few seconds.
-    if (entry && entry.cc === 'EU') flag('EU');
-
-    wantUser(userId, itemId);
+    wantUser(userId, container);
     const rec = await lookupUser(userId);
-    unwantUser(userId, itemId);
+    unwantUser(userId, container);
 
-    if (rec && rec.cc && container.isConnected) {
-      coverage.guessed.delete(itemId);
+    if (rec && rec.cc) {
+      if (!container.isConnected) return;
       flag(rec.cc, rec.city);
       Store.putItem(itemId, rec.cc);
+      return;
     }
+
+    // No answer. A 429 or a challenge opened the circuit while this card
+    // waited, so it goes back in line. A card that scrolled away is picked up
+    // by the observer when it comes back.
+    if (throttle.circuitOpen) deferCard(container);
+  }
+
+  // --------------------------------------------------------------- retrying
+
+  // Cards that met a closed door. Before this they were marked seen and never
+  // looked at again, so one 429 left every card on screen blank for good, and
+  // the only way to get flags back was a reload.
+  const deferred = new Set();
+  let retryTimer = null;
+
+  function deferCard(container) {
+    deferred.add(container);
+    if (retryTimer) return;
+    // Wait out the circuit plus a beat, so the first retry is not the request
+    // that trips it again.
+    const wait = Math.max(1000, throttle.blockedUntil - Date.now() + 1000);
+    retryTimer = setTimeout(retryDeferred, wait);
+  }
+
+  // Cards that asked before anything named their seller, by item id.
+  const awaitingSeller = new Map();
+
+  function awaitSeller(itemId, container) {
+    if (!awaitingSeller.has(itemId)) awaitingSeller.set(itemId, new Set());
+    awaitingSeller.get(itemId).add(container);
+  }
+
+  function sellerArrived(itemId) {
+    const cards = awaitingSeller.get(itemId);
+    if (!cards) return;
+    awaitingSeller.delete(itemId);
+    for (const el of cards) requeue(el);
+  }
+
+  // Unobserving and observing again makes the observer report the card's
+  // current visibility, so only the cards still on screen spend anything.
+  function requeue(el) {
+    if (!el.isConnected || el.dataset.vcf) return;
+    delete el.dataset.vcfSeen;
+    observer.unobserve(el);
+    observer.observe(el);
+  }
+
+  function retryDeferred() {
+    retryTimer = null;
+    if (throttle.circuitOpen) {
+      retryTimer = setTimeout(retryDeferred, throttle.blockedUntil - Date.now() + 1000);
+      return;
+    }
+    const cards = [...deferred];
+    deferred.clear();
+    for (const el of cards) requeue(el);
   }
 
   // ---------------------------------------------------------------- item page
@@ -682,14 +651,16 @@
           if (el.dataset.vcfSeen === '1') continue;
           el.dataset.vcfSeen = '1';
           resolveCard(el).catch(() => {});
-        } else {
-          // Scrolled away before we got to it: stop wanting the lookup.
-          const m = (el.getAttribute('data-testid') || '').match(ITEM_ID_RE);
-          if (!m) continue;
-          for (const [uid, set] of wantedUsers) {
-            if (set.has(m[1])) unwantUser(uid, m[1]);
-          }
+          continue;
         }
+        // Scrolled away before we got to it: stop wanting the lookup, and
+        // forget the card was seen so it is asked about again if it comes
+        // back. Without that, a card scrolled past quickly lost its lookup to
+        // the cancel and then stayed blank for the rest of the page view.
+        for (const [uid, set] of wantedUsers) {
+          if (set.has(el)) unwantUser(uid, el);
+        }
+        if (!el.dataset.vcf) delete el.dataset.vcfSeen;
       }
     },
     { rootMargin: '200px 0px', threshold: 0.01 }
@@ -713,16 +684,15 @@
 
   const mutations = new MutationObserver(() => {
     if (location.href !== lastHref) {
-      // Client-side navigation: the old catalog response no longer applies.
       lastHref = location.href;
-      catalogKey = null;
-      catalogPromise = Promise.resolve(null);
-      catalogRounds = [];
-      catalogMap = null;
+      // The old grid's cards are gone, so nothing will ever re-ask for them.
+      for (const [itemId, cards] of awaitingSeller) {
+        for (const el of cards) if (!el.isConnected) cards.delete(el);
+        if (cards.size === 0) awaitingSeller.delete(itemId);
+      }
       coverage.seen.clear();
       coverage.flagged.clear();
       coverage.guessed.clear();
-      itemProbes = 0;
     }
     scheduleScan();
   });
@@ -753,11 +723,8 @@
   async function start() {
     booted = await boot();
     if (!booted || !enabled) return;
-    // Reading the first screenful's sellers out of the document, and asking for
-    // the rates the fingerprint reads the rest with. Both are homepage only and
-    // neither blocks the scan; the cards wait on ratesReady themselves.
+    // The first screenful's sellers, read out of the document.
     absorbFlight();
-    if (onHomePath() && roundBudget() > 0) ratesReady = loadCatalog(HOME_ROUNDS);
     mutations.observe(document.body, { childList: true, subtree: true });
     scan();
   }
@@ -766,6 +733,10 @@
     mutations.disconnect();
     observer.disconnect();
     clearBadges();
+    clearTimeout(retryTimer);
+    retryTimer = null;
+    deferred.clear();
+    awaitingSeller.clear();
     for (const el of document.querySelectorAll('[data-vcf-watched]')) {
       delete el.dataset.vcfWatched;
       delete el.dataset.vcfSeen;
@@ -802,7 +773,6 @@
           sent: throttle.stats.sent,
           failed: throttle.stats.failed,
           throttled: throttle.stats.throttled,
-          catalogFetches,
           flagged: coverage.flagged.size,
           guessed: coverage.guessed.size,
           seen: coverage.seen.size,

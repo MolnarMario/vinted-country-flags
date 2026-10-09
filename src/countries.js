@@ -116,6 +116,12 @@
       return cur === 'EUR' ? 'EU' : null;
     },
 
+    // What a seller in this country prices in, or null outside every market.
+    currencyOf(code) {
+      const rec = byIso.get(String(code || '').toUpperCase());
+      return rec ? rec.currency : null;
+    },
+
     fromConversion(conversion) {
       const cur = (conversion && conversion.seller_currency) || buyerCurrency;
       return cur ? this.fromCurrency(cur) : null;

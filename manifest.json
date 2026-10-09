@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Vinted Country Flags",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Shows the seller's country flag in the corner of every Vinted listing, on the homepage, in the grid and on the item page.",
   "permissions": [
     "storage"
@@ -115,7 +115,6 @@
         "src/price-currency.js",
         "src/throttle.js",
         "src/store.js",
-        "src/catalog-query.js",
         "src/feed-map.js",
         "src/content.js"
       ],

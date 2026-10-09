@@ -59,7 +59,7 @@ async function refresh() {
   $('circuit-row').hidden = !stats.circuitOpen;
   if (stats.circuitOpen) $('circuit-for').textContent = secs(stats.etaMs) + ' s';
 
-  // On a euro domain every card costs a lookup and the grid fills in over about
+  // Every uncached seller costs a lookup and a cold grid fills in over about
   // a minute. Saying so beats letting it look broken: the flags that are not
   // there yet are the whole complaint a user would have.
   const waiting = stats.pending > 0 && !stats.circuitOpen;
@@ -72,12 +72,16 @@ async function refresh() {
       'Filling in ' + stats.pending + ' more, about ' + secs(stats.etaMs) + ' s.';
   }
 
+  // Vinted dropped the currency from its grid data, so the price fingerprint
+  // has to learn its rates from looked-up sellers before it helps. A euro
+  // domain never gets there, everyone prices in euro.
   $('note').textContent = stats.euroDomain
-    ? 'Everyone here prices in euro, so the currency cannot tell the countries '
-      + 'apart and each seller is looked up once. Scroll and the flags follow. '
-      + 'Answers are cached for 30 days and shared with every other Vinted site.'
-    : 'Most flags come from the price currency and cost no requests. Only '
-      + 'eurozone sellers are looked up, once each, then cached for 30 days.';
+    ? 'Everyone here prices in euro, so each seller is looked up once, starting '
+      + 'with the cards on screen. Answers are cached for 30 days and shared '
+      + 'with every other Vinted site.'
+    : 'The first sellers are looked up once each. They also teach the extension '
+      + 'the exchange rates, and after that most flags come from the price for '
+      + 'free. Answers are cached for 30 days and shared with every other Vinted site.';
 }
 
 chrome.storage.local.get({ enabled: true }, (cfg) => {

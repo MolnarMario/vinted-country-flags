@@ -74,8 +74,7 @@ const libs = [shim, style,
   strip(readFileSync('src/countries.js', 'utf8')),
   strip(readFileSync('src/price-currency.js', 'utf8')),
   strip(readFileSync('src/throttle.js', 'utf8')),
-  strip(readFileSync('src/store.js', 'utf8')),
-  strip(readFileSync('src/catalog-query.js', 'utf8'))].join('\n');
+  strip(readFileSync('src/store.js', 'utf8'))].join('\n');
 
 const content = strip(readFileSync('src/content.js', 'utf8'));
 

@@ -259,6 +259,24 @@ test('cancelling drops queued work before it ever asks for a token', async () =>
   assert.equal(worker.calls.reserve, 3, 'nor a token');
 });
 
+test('cancelling a job that holds a token hands it back without waiting', async () => {
+  // Past the burst every token comes with a delay of a second or more. A card
+  // that scrolls away during it used to keep its slot until the delay ran out.
+  const worker = stubWorker();
+  worker.setWait(5000);
+  const t = loadThrottle(worker);
+  let ran = 0;
+  const job = t.submit('user:1', async () => { ran++; return { ok: true, status: 200 }; });
+  await new Promise((r) => setTimeout(r, 20));
+  const started = Date.now();
+  t.cancel((k) => k === 'user:1');
+  await assert.rejects(job, /cancelled/);
+  assert.ok(Date.now() - started < 1000, 'woken, not slept out');
+  assert.equal(ran, 0);
+  assert.equal(worker.calls.release, 1);
+  assert.equal(t.pending, 0);
+});
+
 test('the shared circuit stops the queue without hitting the network', async () => {
   const worker = stubWorker();
   worker.block(60000); // Retry-After: 60, which is what Vinted answers
@@ -316,29 +334,32 @@ function loadWorker() {
   return ctx.VCF_WORKER;
 }
 
-test('the bucket lets 30 through at once, then paces at one a second', async () => {
+test('the bucket bursts below the measured limit, then paces below it', async () => {
   // Measured against vinted.fr: from a cold bucket exactly 30 requests to
   // /api/v2/users succeed and the 31st gets a 429 with Retry-After: 60. Paced
-  // at one per second, 45 in a row drew nothing. So: capacity 30, refill 1/s.
+  // at one per second, 45 in a row drew nothing. The bucket stays under both,
+  // because the page's own requests spend from the same budget.
   const W = loadWorker();
+  assert.ok(W.CAPACITY < 30 && W.REFILL < 1, 'headroom under the measured limit');
 
   const immediate = [];
-  for (let i = 0; i < 30; i++) {
+  for (let i = 0; i < W.CAPACITY; i++) {
     const g = await W.reserve();
     assert.equal(g.ok, true);
     immediate.push(g.waitMs);
   }
-  assert.deepEqual([...new Set(immediate)], [0], 'the first 30 go straight out');
+  assert.deepEqual([...new Set(immediate)], [0], 'the whole burst goes straight out');
 
+  const step = 1000 / W.REFILL;
   const next = await W.reserve();
-  assert.ok(next.waitMs >= 900 && next.waitMs <= 1100, `31st waits a second, got ${next.waitMs}`);
+  assert.ok(Math.abs(next.waitMs - step) <= 100, `the next waits one refill, got ${next.waitMs}`);
   const after = await W.reserve();
-  assert.ok(after.waitMs >= 1900, 'and the queue keeps stacking a second at a time');
+  assert.ok(after.waitMs >= 2 * step - 100, 'and the queue keeps stacking a refill at a time');
 });
 
 test('a released token goes back into the bucket', async () => {
   const W = loadWorker();
-  for (let i = 0; i < 30; i++) await W.reserve();
+  for (let i = 0; i < W.CAPACITY; i++) await W.reserve();
   await W.release();
   const g = await W.reserve();
   assert.equal(g.waitMs, 0, 'the returned token is spendable straight away');
@@ -619,93 +640,6 @@ test('a dead worker is a cache miss, not a broken page', async () => {
   assert.equal(n.items, 0);
 });
 
-// --------------------------------------------------------- catalog query
-
-function loadQuery() {
-  const ctx = vm.createContext({ URLSearchParams, console });
-  vm.runInContext('globalThis.globalThis = globalThis;', ctx);
-  loadInto(ctx, 'src/catalog-query.js');
-  return ctx.VCF_CatalogQuery;
-}
-
-function parse(qs) {
-  return Object.fromEntries(new URLSearchParams(qs));
-}
-
-test('the category comes off the path, not the query string', () => {
-  const Q = loadQuery();
-  // The bug this guards: without catalog_ids the API answers with the generic
-  // front page feed, which matched 4 of 96 rendered items on vinted.ro.
-  const q = parse(Q.build({ pathname: '/catalog/13-jumpers-and-sweaters', search: '' }));
-  assert.equal(q.catalog_ids, '13');
-  assert.equal(q.per_page, '96');
-  assert.equal(q.page, '1');
-  assert.equal(q.order, 'relevance', 'the page renders the relevance feed by default');
-});
-
-test('the localised catalog slug does not change the id the API reads', () => {
-  const Q = loadQuery();
-  // Same category, three markets. Vinted translates the slug and leaves the
-  // numeric prefix alone, which is the part the regex takes.
-  for (const slug of ['/catalog/3480-cafea-ceai', '/catalog/3480-kaffee-und-tee', '/catalog/3480']) {
-    assert.equal(parse(Q.build({ pathname: slug, search: '' })).catalog_ids, '3480');
-  }
-});
-
-test('brand pages carry their id in the path too', () => {
-  const Q = loadQuery();
-  const q = parse(Q.build({ pathname: '/brand/53-nike', search: '' }));
-  assert.equal(q.brand_ids, '53');
-});
-
-test('bracketed filter params are renamed and merged', () => {
-  const Q = loadQuery();
-  const q = parse(Q.build({
-    pathname: '/catalog',
-    search: '?catalog[]=13&catalog[]=14&brand_ids[]=53&size_ids[]=207&size_ids[]=208',
-  }));
-  assert.equal(q.catalog_ids, '13,14');
-  assert.equal(q.brand_ids, '53');
-  assert.equal(q.size_ids, '207,208');
-  assert.equal(q['catalog[]'], undefined, 'the API ignores the bracketed name');
-});
-
-test('an explicit sort or page beats the default', () => {
-  const Q = loadQuery();
-  const q = parse(Q.build({
-    pathname: '/catalog/13-jumpers-and-sweaters',
-    search: '?order=newest_first&page=3',
-  }));
-  assert.equal(q.order, 'newest_first');
-  assert.equal(q.page, '3');
-});
-
-test('a category in the query string wins over the path', () => {
-  const Q = loadQuery();
-  const q = parse(Q.build({ pathname: '/catalog/13-jumpers', search: '?catalog[]=221' }));
-  assert.equal(q.catalog_ids, '221');
-});
-
-test('front end only params are dropped', () => {
-  const Q = loadQuery();
-  const q = parse(Q.build({
-    pathname: '/catalog',
-    search: '?search_text=nike&disabled_personalization=true&time=1756600000',
-  }));
-  assert.equal(q.search_text, 'nike');
-  assert.equal(q.disabled_personalization, undefined);
-  assert.equal(q.time, undefined);
-});
-
-test('only pages with a grid trigger a catalog request', () => {
-  const Q = loadQuery();
-  assert.equal(Q.isCatalogPath('/catalog'), true);
-  assert.equal(Q.isCatalogPath('/catalog/13-jumpers-and-sweaters'), true);
-  assert.equal(Q.isCatalogPath('/brand/53-nike'), true);
-  assert.equal(Q.isCatalogPath('/member/12345'), false);
-  assert.equal(Q.isCatalogPath('/items/9812725107'), false);
-});
-
 // --------------------------------------------------------- price fingerprint
 
 // Rates observed on vinted.ro on 2026-08-31, plus a forint domain built from
@@ -738,7 +672,7 @@ function loadPrices({
 // What the price would show for a seller who typed `seller` in `cur`.
 const shown = (rates, cur, seller) => Math.round(seller * rates[cur] * 100) / 100;
 
-test('rates are learned from the catalog response, nothing is hardcoded', () => {
+test('rates are read off conversions when Vinted sends them', () => {
   const P = loadPrices();
   const r = P.rates();
   assert.equal(r.get('RON'), 1, 'the buyer currency comes from the country table');
@@ -841,17 +775,85 @@ test('an expensive foreign item is refused while the rate is still rough', () =>
   assert.equal(P.currencyFor(shown(RATE, 'HUF', 12500)), 'HUF', 'an ordinary one still resolves');
 });
 
-test('the fingerprint refuses to run until the euro rate anchors it', () => {
-  // Only zloty seen, so there is a second currency but nothing to size the
-  // guard against. Answering here is what put wrong flags on forint prices.
+test('the guard is sized from the rough euro rate until a euro seller turns up', () => {
+  // Only zloty seen. The guard used to stay null here and the fingerprint off,
+  // which was right while conversions named the euro rate within a page. Now
+  // the rate has to be fitted from euro sellers the page happens to show, and
+  // a floor does not need the exact rate, so the rough one sizes it.
   const P = loadPrices({
     samples: [
       { cur: 'PLN', seller: 100 }, { cur: 'PLN', seller: 250 }, { cur: 'PLN', seller: 470 },
     ],
   });
-  assert.equal(P.minSpacing(), null);
-  assert.equal(P.ready(), false);
-  assert.equal(P.currencyFor(500), null);
+  assert.ok(P.minSpacing() > 0.9 && P.minSpacing() < 1.2, `about one leu, got ${P.minSpacing()}`);
+  assert.equal(P.ready(), true);
+  assert.equal(P.currencyFor(500), 'RON');
+  // A euro price still has nothing to match and is left to a lookup.
+  assert.equal(P.currencyFor(shown(RATE, 'EUR', 40)), null);
+});
+
+// What the fingerprint sees on vinted.ro since 2026-10-08: no conversions, only
+// a shown price beside a seller whose country a lookup or the cache settled.
+function observePrices(observations, lang = 'ro-RO') {
+  const P = loadPrices({ lang, samples: [] });
+  for (const [cur, seller] of observations) P.observe(shown(RATE, cur, seller), cur);
+  return P;
+}
+
+test('a rate is fitted from known sellers when no conversion arrives', () => {
+  const P = observePrices([
+    ['PLN', 100], ['PLN', 45], ['PLN', 250], ['PLN', 80], ['PLN', 39.99], ['PLN', 120],
+    ['EUR', 40], ['EUR', 15], ['EUR', 25], ['EUR', 12],
+  ]);
+  const r = P.rates();
+  assert.ok(Math.abs(r.get('PLN') / RATE.PLN - 1) < 2e-4, `PLN ${r.get('PLN')}`);
+  assert.ok(Math.abs(r.get('EUR') / RATE.EUR - 1) < 2e-4, `EUR ${r.get('EUR')}`);
+  assert.equal(P.currencyFor(shown(RATE, 'PLN', 60)), 'PLN');
+  assert.equal(P.currencyFor(shown(RATE, 'EUR', 30)), 'EUR');
+  assert.equal(P.currencyFor(150), 'RON');
+});
+
+test('prices all in tens never settle on the rate a tenth off', () => {
+  // r * 10/9 explains 100, 50 and 200 zloty as 90, 45 and 180, and fits every
+  // item as well as the true rate does. With nothing to tell them apart the
+  // answer is no rate at all, and one odd price is enough to break the tie.
+  const tens = observePrices([['PLN', 100], ['PLN', 50], ['PLN', 200], ['PLN', 150], ['PLN', 30]]);
+  const r = tens.rates().get('PLN');
+  assert.ok(r === undefined || Math.abs(r / RATE.PLN - 1) < 1e-3, `PLN ${r}`);
+  const mixed = observePrices([
+    ['PLN', 100], ['PLN', 50], ['PLN', 200], ['PLN', 150], ['PLN', 30], ['PLN', 39], ['PLN', 67],
+  ]);
+  assert.ok(Math.abs(mixed.rates().get('PLN') / RATE.PLN - 1) < 1e-3, `PLN ${mixed.rates().get('PLN')}`);
+});
+
+test('forints too coarse to fit are refused, not fitted wrong', () => {
+  // Counted in tens, 4990 Ft sits within a hundredth of a leu of 49/50 of the
+  // rate, so ten ordinary forint prices fit two rates at once. The fit has to
+  // say nothing then, and a forint price has to stay with a lookup.
+  const P = observePrices([
+    ['PLN', 100], ['PLN', 45], ['PLN', 250], ['PLN', 80], ['PLN', 120],
+    ['HUF', 12500], ['HUF', 4990], ['HUF', 3990], ['HUF', 20000], ['HUF', 7500],
+    ['HUF', 2990], ['HUF', 1500], ['HUF', 8990], ['HUF', 6000], ['HUF', 2490],
+  ]);
+  const huf = P.rates().get('HUF');
+  assert.ok(huf === undefined || Math.abs(huf / RATE.HUF - 1) < 2e-4, `HUF ${huf}`);
+  for (const ft of [8000, 4990, 15000]) {
+    const got = P.currencyFor(shown(RATE, 'HUF', ft));
+    assert.ok(got === null || got === 'HUF', `${ft} Ft read as ${got}`);
+  }
+});
+
+test('a fitted rate waits for enough sellers to agree', () => {
+  const few = observePrices([['PLN', 100], ['PLN', 45], ['PLN', 250]]);
+  assert.equal(few.rates().has('PLN'), false, 'three items are not enough to fit');
+  // Prices with cents fit no whole number, so they cannot outvote the rest.
+  const messy = observePrices([
+    ['PLN', 41.37], ['PLN', 12.83], ['PLN', 77.21], ['PLN', 19.64], ['PLN', 100],
+  ]);
+  assert.equal(messy.rates().has('PLN'), false);
+  // Our own currency is never fitted: its rate is 1 by definition.
+  const home = observePrices([['RON', 50], ['RON', 60], ['RON', 70], ['RON', 80]]);
+  assert.equal(home.rates().get('RON'), 1);
 });
 
 test('a euro domain turns the fingerprint off by itself', () => {
@@ -931,6 +933,63 @@ test('an item photo is not mistaken for an item', () => {
     }],
   };
   assert.deepEqual(plain(F.fromApi(body)), [{ id: '9848737794', userId: '3155965908' }]);
+});
+
+// One catalog item as vinted.ro served it on 2026-10-08, inside the payload the
+// search page hydrates from. Trimmed, but the thumbnail URLs are kept at their
+// real length because they are what pushes the seller a thousand characters
+// past the item id.
+const THUMB = 'https://images1.vinted.net/t/06_00a1b_' + 'x'.repeat(120) + '/f800/1791480000.webp?s=' + 'a'.repeat(40);
+const CATALOG_ITEM =
+  '{\\"id\\":10103477464,\\"productItem\\":{\\"id\\":10103477464,\\"title\\":\\"Gryf Olimpijski\\",' +
+  '\\"url\\":\\"/items/10103477464-gryf-olimpijski\\",\\"favouriteCount\\":7,\\"priceWithDiscount\\":null,' +
+  '\\"price\\":{\\"amount\\":\\"371.27\\",\\"currencyCode\\":\\"RON\\"},' +
+  '\\"thumbnailUrl\\":\\"' + THUMB + '\\",\\"thumbnailUrls\\":[\\"' + THUMB + '\\"],' +
+  '\\"dominantColor\\":\\"#DFDAD5\\",\\"user\\":{\\"id\\":90829612,\\"photo\\":null,\\"isBusiness\\":false}}}';
+
+test('the catalog page names its sellers in the document too', () => {
+  const F = loadFeedMap();
+  const doc = 'self.__next_f.push([1,"5:{\\"items\\":[' + CATALOG_ITEM + ',' +
+    CATALOG_ITEM.replace(/10103477464/g, '10103477465').replace('90829612', '90829613') + ']}"])';
+  assert.deepEqual(plain(F.fromFlight(doc)), [
+    { id: '10103477464', userId: '90829612' },
+    { id: '10103477465', userId: '90829613' },
+  ]);
+});
+
+test('a catalog item with no seller does not borrow the next one', () => {
+  const F = loadFeedMap();
+  const orphan = '{\\"id\\":1,\\"productItem\\":{\\"id\\":1,\\"title\\":\\"x\\"}}';
+  const pairs = F.fromFlight(orphan + ',' + CATALOG_ITEM);
+  assert.deepEqual(plain(pairs), [{ id: '10103477464', userId: '90829612' }]);
+});
+
+test('the catalog grid response names every seller', () => {
+  // api.vinted.ro/svc-catalogue/items as it answered on 2026-10-08. No
+  // conversion object anywhere, and item_box repeats the id under item_id.
+  const F = loadFeedMap();
+  const body = {
+    items: [{
+      id: 10023964817,
+      item_box: { item_id: 10023964817, first_line: 'piercing' },
+      photo: { id: 1, image_no: 1 },
+      price: { amount: '18.56', currency_code: 'RON' },
+      user: { business: false, id: 276162419, login: 'lola_9090' },
+    }],
+    pagination: { current_page: 2 },
+  };
+  assert.deepEqual(plain(F.fromApi(body)), [
+    { id: '10023964817', userId: '276162419', currency: 'RON' },
+  ]);
+});
+
+test('a conversion travels with its item when Vinted still sends one', () => {
+  const F = loadFeedMap();
+  const conversion = { seller_price: '100.0', seller_currency: 'PLN', buyer_currency: 'RON' };
+  const body = { items: [{ id: 5, user: { id: 6 }, price: { amount: '122.42', currency_code: 'RON' }, conversion }] };
+  const [pair] = plain(F.fromApi(body));
+  assert.equal(pair.conversion.seller_currency, 'PLN');
+  assert.equal(pair.price.amount, '122.42');
 });
 
 test('a shape nobody recognises answers nothing rather than guessing', () => {
