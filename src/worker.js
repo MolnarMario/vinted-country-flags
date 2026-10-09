@@ -11,20 +11,32 @@
 // the granted delay, fetches from the page's own context, then reports what
 // came back.
 
-const CAPACITY = 30;   // measured: exactly 30 succeed from a cold bucket
-const REFILL = 1;      // per second; 45 paced requests in a row drew no 429
+// Measured on vinted.fr: from a cold bucket exactly 30 requests succeed, and
+// paced at 1 per second 45 in a row drew no 429. The extension used to run
+// right at that edge, which was fine while it sent a handful of lookups per
+// page. Since 2026-10-08 every uncached seller costs one, the page's own
+// /api/v2 calls (banners, info_banners) hit the same host, and Vinted now has
+// a "Client Challenge" page it serves instead of JSON. So the bucket keeps
+// a third of the burst and a fifth of the rate back for the site itself.
+const CAPACITY = 20;
+const REFILL = 0.8;    // per second
 const FALLBACK_RETRY_MS = 60000; // what Vinted's Retry-After said, every time
 
 const DB_NAME = 'vinted-country-flags';
-const DB_VERSION = 1;
+// Version 2 throws away every cached item. Up to 2.1.0 a card nobody else
+// could name had its seller read off the item page, and that page also carries
+// the visitor's own profile link, so some items were cached for thirty days
+// under the visitor's country. Sellers are kept: each of those came from the
+// seller's own profile and is right.
+const DB_VERSION = 2;
 const TTL_MS = 30 * 24 * 60 * 60 * 1000; // a seller's country basically never changes
 const COUNTRIES_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ------------------------------------------------------------- token bucket
 
 // The worker is torn down after about 30 seconds idle and the bucket goes with
-// it. That happens to be right: 30 idle seconds refill 30 tokens anyway, which
-// is the whole capacity. The circuit is the part that has to survive, so it
+// it. That happens to be right: 30 idle seconds refill 24 tokens, more than the
+// whole capacity. The circuit is the part that has to survive, so it
 // lives in session storage.
 let bucket = null;
 
@@ -139,8 +151,11 @@ function openDb() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
+      if (event.oldVersion >= 1 && event.oldVersion < 2 && db.objectStoreNames.contains('items')) {
+        db.deleteObjectStore('items');
+      }
       if (!db.objectStoreNames.contains('users')) db.createObjectStore('users', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('items')) db.createObjectStore('items', { keyPath: 'id' });
     };
@@ -278,7 +293,7 @@ const HANDLERS = {
 // The bucket is the one piece of arithmetic here that can be wrong in a way
 // nobody notices until Vinted starts answering 429, so the tests reach it
 // directly rather than through the message channel.
-globalThis.VCF_WORKER = { reserve, release, report, bucketState, HANDLERS };
+globalThis.VCF_WORKER = { reserve, release, report, bucketState, HANDLERS, CAPACITY, REFILL };
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   const handler = msg && HANDLERS[msg.k];

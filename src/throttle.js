@@ -6,13 +6,13 @@
 // paced at one per second, 45 in a row draw nothing. That is a token bucket of
 // 30 refilling at about 1 per second, and it is shared across domains per IP.
 //
-// So the bucket lives in the service worker and this is the queue in front of
-// it. The queue is what makes cancelling possible: a card scrolled off screen
+// So the bucket lives in the service worker, set a margin below those numbers
+// (see worker.js), and this is the queue in front of it. The queue is what makes cancelling possible: a card scrolled off screen
 // is dropped before it ever asks for a token.
 
 (() => {
   const CONCURRENCY = 3; // only decides how fast a full bucket drains
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const REFILL_MS = 1250; // one token at the worker's 0.8 per second
 
   async function ask(k, payload) {
     try {
@@ -27,8 +27,9 @@
     constructor() {
       this.queue = [];
       this.active = 0;
+      this.waiting = new Set(); // jobs holding a token, sleeping out its delay
       this.blockedUntil = 0;
-      this.tokens = 30;
+      this.tokens = 20;
       this.stats = { sent: 0, failed: 0, throttled: 0 };
     }
 
@@ -45,7 +46,7 @@
     // instead of looking broken.
     get etaMs() {
       const owed = Math.max(0, this.pending - Math.floor(this.tokens));
-      return Math.max(this.blockedUntil - Date.now(), owed * 1000);
+      return Math.max(this.blockedUntil - Date.now(), owed * REFILL_MS);
     }
 
     // task() must resolve to { ok, status, retryAfter }. It may also resolve to
@@ -65,6 +66,15 @@
       }
       const dropped = this.queue.length - keep.length;
       this.queue = keep;
+      // A job past the queue may hold a token and still be sleeping out its
+      // delay, which is seconds once the burst is spent. Waking it hands the
+      // token back now and frees the slot for a card that is on screen.
+      for (const job of this.waiting) {
+        if (predicate(job.key)) {
+          job.cancelled = true;
+          job.wake();
+        }
+      }
       return dropped;
     }
 
@@ -97,7 +107,22 @@
         for (const queued of this.queue.splice(0)) queued.reject(err);
         return;
       }
-      if (grant.waitMs > 0) await sleep(grant.waitMs);
+      if (grant.waitMs > 0) {
+        this.waiting.add(job);
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, grant.waitMs);
+          job.wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+        this.waiting.delete(job);
+        if (job.cancelled) {
+          ask('release');
+          job.reject(new Error('cancelled'));
+          return;
+        }
+      }
       return this._invoke(job);
     }
 

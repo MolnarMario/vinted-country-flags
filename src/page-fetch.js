@@ -8,20 +8,19 @@
 //
 // Guard rails, because the page can see this listener too:
 //   - only messages from this exact window are answered
-//   - only the same-origin paths listed below are fetched
+//   - only the same-origin JSON paths listed below are fetched
 //   - a JSON response is handed back verbatim, never evaluated
-//   - an item page is 2MB of HTML, so it is never handed back. One regex runs
-//     here and only the seller's numeric id crosses back.
 //
-// It also reads one response the site asks for on its own account. See below.
+// It also reads the responses the site asks for on its own account. See below.
 
 (() => {
   const REQ = 'vcf-fetch-request';
   const RES = 'vcf-fetch-response';
   const FEED = 'vcf-feed-items';
-  const ALLOWED_JSON = /^\/api\/v2\/(catalog\/items|users\/\d+|countries)(\?|$)/;
-  const ALLOWED_ITEM = /^\/items\/\d+(\?|$)/;
-  const MEMBER = /\/member\/(\d+)/;
+  // Only two endpoints are left. /api/v2/catalog/items went away on 2026-10-08
+  // and the item page fetch went with it: a two megabyte document that also
+  // names the visitor's own profile, so it could hand back the wrong member.
+  const ALLOWED_JSON = /^\/api\/v2\/(users\/\d+|countries)(\?|$)/;
 
   window.addEventListener('message', async (event) => {
     if (event.source !== window) return;
@@ -31,8 +30,7 @@
     const reply = (payload) =>
       window.postMessage({ type: RES, id: msg.id, ...payload }, location.origin);
 
-    const wantsItem = ALLOWED_ITEM.test(msg.path);
-    if (!wantsItem && !ALLOWED_JSON.test(msg.path)) {
+    if (!ALLOWED_JSON.test(msg.path)) {
       reply({ ok: false, status: 0, error: 'path not allowed' });
       return;
     }
@@ -40,7 +38,7 @@
     try {
       const res = await fetch(msg.path, {
         credentials: 'include',
-        headers: { Accept: wantsItem ? 'text/html' : 'application/json' },
+        headers: { Accept: 'application/json' },
       });
       if (!res.ok) {
         // A 429 says how long to stay away. Vinted's answer was 60 every time,
@@ -52,12 +50,13 @@
         });
         return;
       }
-      if (wantsItem) {
-        // An item page links to exactly one member, its seller. Everything else
-        // in those two megabytes stays here.
-        const html = await res.text();
-        const m = html.match(MEMBER);
-        reply({ ok: true, status: res.status, memberId: m ? m[1] : null });
+      // When Vinted decides the traffic looks automated it answers an API path
+      // with an HTML "Client Challenge" page instead of JSON, sometimes with a
+      // 200. That is the site pushing back, the same as a 429, and the worker
+      // has to hear it that way or the queue keeps knocking.
+      const type = res.headers.get('Content-Type') || '';
+      if (!/json/i.test(type)) {
+        reply({ ok: false, status: 429, retryAfter: null, error: 'challenge' });
         return;
       }
       const body = await res.json();
@@ -67,20 +66,21 @@
     }
   });
 
-  // ------------------------------------------------------- homepage feed
+  // ------------------------------------------------------------ grid feeds
 
-  // Scrolling the homepage pages the feed in from
-  // api.vinted.<tld>/homepage/homepage, and each item there carries the
-  // seller's id. That request is not one the extension can make: replayed with
-  // the same query it answers 400, so whatever authorises it is a header only
-  // Vinted's own front end sends. Reading the answer it already got costs
-  // nothing and is the only thing that puts a flag on a homepage card past the
-  // first screenful.
+  // Every grid past the first screenful arrives over an XHR the site makes for
+  // itself, and each item in it carries the seller's id:
+  //   api.vinted.<tld>/homepage/homepage     the homepage, as it scrolls
+  //   api.vinted.<tld>/svc-catalogue/items   the catalog, on every page change,
+  //                                          filter and sort
+  // Reading the answer it already got costs nothing. Asking for it again would
+  // cost a request and, on the catalog, return a different shuffle: a replay
+  // of the exact same URL shared 50 of its 96 items with the grid on screen.
   //
-  // Vinted sends it over XMLHttpRequest, not fetch, measured on vinted.ro. If
-  // that ever changes the homepage quietly falls back to its first screenful,
-  // and the same few lines wrapped around window.fetch bring it back.
-  const FEED_URL = /\/homepage\/homepage(\?|$)/;
+  // Vinted sends both over XMLHttpRequest, not fetch, measured on vinted.ro.
+  // If that ever changes the grids quietly fall back to their first screenful,
+  // and the same few lines wrapped around window.fetch bring them back.
+  const FEED_URL = /\/(homepage\/homepage|svc-catalogue\/items)(\?|$)/;
   const FeedMap = globalThis.VCF_FeedMap;
 
   if (FeedMap) {
@@ -92,7 +92,9 @@
         if (FEED_URL.test(String(url))) {
           this.addEventListener('load', () => {
             try {
-              const pairs = FeedMap.fromApi(JSON.parse(this.responseText));
+              const body =
+                this.responseType === 'json' ? this.response : JSON.parse(this.responseText);
+              const pairs = FeedMap.fromApi(body);
               if (pairs.length) window.postMessage({ type: FEED, pairs }, location.origin);
             } catch (e) {
               /* not the JSON we expected, or a responseType with no text */
