@@ -1,14 +1,87 @@
-# Vinted Country Flags
+<p align="center">
+  <img src="icons/icon128.png" alt="Vinted Country Flags icon" width="96">
+</p>
 
-Chrome extension that puts the seller's country flag in the corner of every item
-on Vinted: the homepage, the search grid and the listing page. All 27 markets.
+<h1 align="center">Vinted Country Flags</h1>
 
-![the grid with flags](docs/screenshot.jpg)
+<p align="center">
+  <b>See where every Vinted seller is, right on the listing.</b><br>
+  A Chrome extension that puts the seller's country flag in the corner of
+  every item on Vinted: the homepage, search results, seller pages and the
+  item page. All 27 markets, on every Vinted domain.
+</p>
+
+<p align="center">
+  <a href="https://github.com/MolnarMario/vinted-country-flags/releases/latest"><b>Download the latest release</b></a> ·
+  <a href="https://thebarbellengineer.com/projects/vinted-country-flags/">Project page</a> ·
+  <a href="#install">Install</a> ·
+  <a href="LICENSE">GPL-3.0</a>
+</p>
+
+![The Vinted grid with a country flag on every item](docs/screenshot.jpg)
+
+## Why
 
 Vinted shows you items from sellers all over Europe and never says where they
 are. Not on the card, not on the listing page, not in the HTML behind either.
-The only way to find out is opening the seller's profile, which kills browsing.
-This puts the answer on the picture.
+Where the seller is decides the shipping cost, how long it takes and whether
+a return is worth the trouble, and the only way to find out is opening each
+seller's profile, which kills browsing. This puts the answer on the picture.
+
+## What it does
+
+- **A flag on every listing.** The seller's country flag sits in the corner of
+  each item on the homepage, in search results, on seller pages and on the
+  item page.
+- **Every Vinted domain, no per-country code.** It learns the markets from
+  Vinted itself, so .fr, .de, .pl, .co.uk, .ro and the rest all work the same.
+- **Mostly free.** Who the seller is comes from data the page already
+  loaded. Where they live costs one profile lookup per seller, once, and is
+  then remembered for 30 days across every Vinted domain.
+- **The cards you're looking at go first.** Cards in and near the screen are
+  looked up first, and the popup shows how many are still coming.
+- **Polite to Vinted.** It stays under the measured rate limit, shares one
+  budget across all your tabs, and stops whenever Vinted says to slow down.
+- **No flag beats a wrong flag.** A card whose seller nothing named gets no
+  flag rather than a guess.
+- **Nothing leaves your browser.** It reads Vinted's own API with your own
+  session and sends nothing anywhere else.
+
+The toolbar popup has an on/off switch, the coverage on the current page, how
+much request budget is left, the cache counts and a "clear cache" button.
+
+## Install
+
+It is not on the Chrome Web Store, so it installs as an unpacked extension.
+
+1. Download the zip from the
+   [latest release](https://github.com/MolnarMario/vinted-country-flags/releases/latest).
+2. Unpack it somewhere you will keep it. Chrome reloads the extension from that
+   folder on every start, so do not delete it afterwards.
+3. Go to `chrome://extensions` and turn on Developer mode, top right.
+4. Click "Load unpacked" and pick the unpacked folder, the one holding
+   `manifest.json`.
+5. Open any Vinted market, for example https://www.vinted.fr/catalog?search_text=nike
+
+Chrome will keep showing a "Disable developer mode extensions" warning on
+startup. That is Chrome's standard nag for anything not installed from the
+Store, not a problem with the extension.
+
+Chrome will list 28 sites in the permission prompt. Match patterns cannot
+wildcard a TLD, so every market has to be named.
+
+**Updating:** download the new release, replace the files in the same folder,
+and click the reload arrow on the extension's card in `chrome://extensions`.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| No flags at all | Check the switch in the toolbar popup, and that the extension is enabled in `chrome://extensions`. |
+| Flags fill in slowly on a new search | Each new seller costs one lookup, paced to stay under Vinted's rate limit. The popup shows how many are still coming. Sellers you've seen before appear at once. |
+| A few cards never get a flag | Nothing on the page named their seller, so the extension leaves them blank rather than guess. |
+| Flags stop and the popup says "Paused after pushback" | Vinted asked for a pause. Lookups resume by themselves when the countdown ends. |
+| The extension disappeared after a restart | Chrome loads it from the folder you picked. Don't move or delete that folder. |
 
 ## How it knows
 
@@ -135,30 +208,6 @@ earlier version walked up from the card and took the first `/member/` link it
 found, which on a catalog page meant grabbing whichever closet row happened to
 come first in the document and labelling unrelated items with its country. A
 wrong flag is worse than no flag, so grid cards do not climb at all.
-
-## Install
-
-It is not on the Chrome Web Store, so it installs as an unpacked extension.
-
-1. Download the zip from the
-   [latest release](https://github.com/MolnarMario/vinted-country-flags/releases/latest).
-2. Unpack it somewhere you will keep it. Chrome reloads the extension from that
-   folder on every start, so do not delete it afterwards.
-3. Go to `chrome://extensions` and turn on Developer mode, top right.
-4. Click "Load unpacked" and pick the unpacked folder, the one holding
-   `manifest.json`.
-5. Open any Vinted market, for example https://www.vinted.fr/catalog?search_text=nike
-
-Chrome will keep showing a "Disable developer mode extensions" warning on
-startup. That is Chrome's standard nag for anything not installed from the
-Store, not a problem with the extension.
-
-Chrome will list 28 sites in the permission prompt. Match patterns cannot
-wildcard a TLD, so every market has to be named.
-
-The toolbar popup has an on/off switch, the coverage on the current page, how
-much request budget is left, the cache counts, and a "clear cache" button. While
-lookups are queued it also shows how many cards are still filling in.
 
 ## Layout
 
